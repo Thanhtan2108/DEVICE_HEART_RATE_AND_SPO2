@@ -1,0 +1,54 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#include <Arduino.h>
+
+/*
+  config.h  (header-only)
+  - Chứa cấu hình WiFi và Firebase Realtime Database (host + secret).
+  - Đây là file chứa secret: KHÔNG nên push lên repo công khai.
+  - Cách an toàn hơn: bỏ giá trị thật ra file .gitignored, hoặc dùng build_flags/system env.
+*/
+
+/* ----------------------------
+   ===  EDIT THESE VALUES  ===
+   ---------------------------- */
+
+/* Hardware pins (change as needed)
+   Note: Use ESP32 GPIO numbers (not NodeMCU Dx labels). */
+#define BUTTON_PIN 13   // default: GPIO13 (change if you wired differently)
+#define LED_PIN    12   // default: GPIO12 
+
+/* I2C device addresses */
+#define OLED_ADDR       0x3C
+#define MAX30102_ADDR   0x57
+
+/* WiFi credentials */
+static const char WIFI_SSID[]     = "USERNAME WIFI";
+static const char WIFI_PASSWORD[] = "PASSWORD WIFI";
+
+/* Firebase Realtime Database host
+   e.g. "https://your-project-id-default-rtdb.firebaseio.com" */
+static const char FIREBASE_HOST[] = "URL DATABASE";
+
+/* Firebase Database Secret (legacy) or database secret token.
+   If you use a modern Firebase SDK with OAuth, you may leave this empty.
+   WARNING: keep this secret private. */
+static const char FIREBASE_AUTH[] = "DATABASE SECRECT";
+
+/* How often to send a report to Firebase (ms) */
+static constexpr unsigned long FIREBASE_REPORT_INTERVAL_MS = 3000UL;
+
+/* Optional: root path in your RTDB where data will be pushed */
+static const char FIREBASE_PATH_ROOT[] = "/health";
+
+/* NTP time configuration */
+static const char NTP_SERVER[] = "pool.ntp.org";
+static const long GMT_OFFSET_SEC = 7 * 3600; // múi giờ VN (GMT+7)
+static const int DAYLIGHT_OFFSET_SEC = 0;
+
+/* ----------------------------
+   ===  END EDITABLE PART  ===
+   ---------------------------- */
+
+#endif // CONFIG_H
