@@ -26,8 +26,8 @@
 #define MAX30102_ADDR   0x57
 
 /* WiFi credentials */
-static const char WIFI_SSID[]     = "Thanh Tan";
-static const char WIFI_PASSWORD[] = "daquenmatroi";
+static const char WIFI_SSID[]     = "P203&P204&P205";
+static const char WIFI_PASSWORD[] = "102duylam";
 
 /* Firebase Realtime Database host
    e.g. "https://your-project-id-default-rtdb.firebaseio.com" */
