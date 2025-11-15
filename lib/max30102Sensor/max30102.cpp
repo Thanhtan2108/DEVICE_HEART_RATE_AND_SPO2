@@ -1,23 +1,42 @@
 #include "max30102.h"
-#include "../common/pinConfig.h"
-#include "../common/systemConfig.h"
-#include "../common/sensorConfig.h"
+
+#include "pinConfig.h"
+#include "systemConfig.h"
+#include "sensorConfig.h"
+#include "i2c_mutex.h"
 
 #include <Wire.h>
 #include "MAX30105.h"
 #include "spo2_algorithm.h"
 #include "heartRate.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <esp_task_wdt.h>
 
+// Debug macro: set 1 to enable Serial prints inside this file (not recommended in production)
+#ifndef MAX30102_DEBUG
+#define MAX30102_DEBUG 0
+#endif
+
+#if MAX30102_DEBUG
+  #define LOG(x)   Serial.print(x)
+  #define LOGLN(x) Serial.println(x)
+#else
+  #define LOG(x)
+  #define LOGLN(x)
+#endif
+
 static MAX30105 particleSensor;
 
-// RTOS objects
+// FreeRTOS task handle for read task
 static TaskHandle_t s_taskHandle = nullptr;
-static SemaphoreHandle_t s_intSemaphore = nullptr;
 
-// Algorithm buffers (BUFFER_SIZE from spo2_algorithm.h)
+// Running flag for controlled stop
+static volatile bool s_taskRunning = false;
+
+// Algorithm buffers (BUFFER_SIZE comes from spo2_algorithm.h)
 static uint32_t ir_buffer[BUFFER_SIZE];
 static uint32_t red_buffer[BUFFER_SIZE];
 static volatile int buf_index = 0;
@@ -27,51 +46,63 @@ static uint32_t acc_ir = 0;
 static uint32_t acc_red = 0;
 static uint8_t acc_count = 0;
 
-// Latest computed results
+// Latest computed results (volatile for safe single-word reads)
 static volatile int32_t latest_spo2 = -999;
 static volatile int32_t latest_hr = -999;
 static volatile bool latest_spo2_valid = false;
 static volatile bool latest_hr_valid = false;
-static volatile bool serial_print_enabled = true;
 
-// Forward
+// Forward declarations
 static void readTask(void *pvParameters);
 static void IRAM_ATTR intISRHandler(void);
 
 // Constructor
 Max30102Sensor::Max30102Sensor() {}
 
-// ISR: minimal - give semaphore
-static void IRAM_ATTR intISRHandler(void) {
+// ISR (minimal): notify the read task via task notification
+static void IRAM_ATTR intISRHandler(void)
+{
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  if (s_intSemaphore) {
-    xSemaphoreGiveFromISR(s_intSemaphore, &xHigherPriorityTaskWoken);
+  if (s_taskHandle != nullptr) {
+    vTaskNotifyGiveFromISR(s_taskHandle, &xHigherPriorityTaskWoken);
     if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
   }
 }
 
-bool Max30102Sensor::begin() {
-  // sanity check DECIMATE_FACTOR (compile-time ideally, runtime as backup)
+// begin(): configure I2C and sensor (but DO NOT attach ISR or create task here)
+bool Max30102Sensor::begin()
+{
+  // Basic sanity
   if (DECIMATE_FACTOR <= 0) {
-    Serial.println("DECIMATE_FACTOR invalid. Check SENSOR_SAMPLE_RATE and ALGO_FREQ.");
+    LOGLN("DECIMATE_FACTOR invalid.");
     return false;
   }
 
-  // Init I2C
+  // Initialize I2C (take mutex if available)
+  if (!I2C_MUTEX_TAKE(pdMS_TO_TICKS(100))) {
+    LOGLN("I2C mutex take failed in begin");
+    return false;
+  }
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(I2C_CLOCK_HZ);
+  I2C_MUTEX_GIVE();
 
-  // Soft reset device to ensure known state (SparkFun lib provides softReset())
+  // Soft reset (protect the I2C ops with mutex)
+  if (!I2C_MUTEX_TAKE(pdMS_TO_TICKS(100))) return false;
   particleSensor.softReset();
-  delay(10);
+  I2C_MUTEX_GIVE();
+  vTaskDelay(pdMS_TO_TICKS(10));
 
-  // Begin sensor (checks PART ID inside)
-  if (!particleSensor.begin(Wire, I2C_CLOCK_HZ, MAX30105_ADDRESS)) {
-    Serial.println("MAX30105/02 not found. Check wiring/power.");
+  // Begin sensor (checks PART ID)
+  if (!I2C_MUTEX_TAKE(pdMS_TO_TICKS(100))) return false;
+  bool ok = particleSensor.begin(Wire, I2C_CLOCK_HZ, MAX30105_ADDRESS);
+  I2C_MUTEX_GIVE();
+  if (!ok) {
+    LOGLN("MAX30105/02 not found.");
     return false;
   }
 
-  // Setup sensor using sensorConfig defaults
+  // Setup config sensor with values from sensorConfig.h
   byte powerLevel = SENSOR_LED_POWER;
   byte sampleAverage = (SENSOR_FIFO_SAMPLEAVG == 1) ? 1 : SENSOR_FIFO_SAMPLEAVG;
   byte ledMode = SENSOR_LED_MODE;
@@ -79,59 +110,102 @@ bool Max30102Sensor::begin() {
   int pulseWidth = SENSOR_PULSE_WIDTH;
   int adcRange = SENSOR_ADC_RANGE;
 
+  if (!I2C_MUTEX_TAKE(pdMS_TO_TICKS(100))) return false;
   particleSensor.setup(powerLevel, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
 
-  // FIFO configure
+  // FIFO configuration
   particleSensor.clearFIFO();
-  particleSensor.enableFIFORollover(); // optional: allows continuous operation without manual pointer management
+  particleSensor.enableFIFORollover(); // optional
   particleSensor.setFIFOAlmostFull(SENSOR_FIFO_A_FULL);
 
-  // Enable interrupts: Almost Full and Data Ready
+  // Enable interrupts of interest (device-level)
   particleSensor.enableAFULL();
   particleSensor.enableDATARDY();
 
-  // Clear any pending interrupts by reading INT status registers
-  // (SparkFun wrapper getINT1/getINT2 simply read INTSTAT1/2)
-  (void) particleSensor.getINT1();
-  (void) particleSensor.getINT2();
+  // Clear pending interrupt state
+  (void)particleSensor.getINT1();
+  (void)particleSensor.getINT2();
+  I2C_MUTEX_GIVE();
 
-  // Create binary semaphore for INT handling
-  s_intSemaphore = xSemaphoreCreateBinary();
-  if (!s_intSemaphore) {
-    Serial.println("Failed to create semaphore for INT - falling back to polling");
-  }
-
-  // Attach ISR to INT pin only if semaphore created and pin valid
-  if (MAX30102_INT_PIN >= 0 && s_intSemaphore) {
-    // Note: on ESP32, some pins (34..39) are input-only and may not provide reliable internal pull-ups.
-    // If using such a pin, ensure the INT line has an external pull-up to VCC on your board.
-    // Alternatively choose a GPIO with internal pull-up support.
-    pinMode(MAX30102_INT_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(MAX30102_INT_PIN), intISRHandler, FALLING);
-    Serial.printf("INT pin attached: %d\n", MAX30102_INT_PIN);
-  } else if (MAX30102_INT_PIN >= 0) {
-    Serial.printf("INT pin %d provided but semaphore not created: using polling\n", MAX30102_INT_PIN);
-  } else {
-    Serial.println("INT pin disabled (MAX30102_INT_PIN < 0) - using polling");
-  }
-
-  // Reset buffers and accumulators
+  // Reset buffers and state
   buf_index = 0;
   acc_ir = acc_red = 0;
   acc_count = 0;
 
-  // Reset latest values
   latest_spo2 = -999;
   latest_hr = -999;
   latest_spo2_valid = false;
   latest_hr_valid = false;
 
-  // All set
   return true;
 }
 
-// process buffers when full (call algorithm)
-static void max30102_process_buffers_when_full() {
+// Called from main to start the read task and attach ISR afterwards.
+// We attach ISR only after task is created so notifications have a target.
+bool Max30102Sensor::start()
+{
+  if (s_taskHandle) return true; // already running
+
+  s_taskRunning = true;
+
+  BaseType_t ret = xTaskCreatePinnedToCore(
+    readTask,
+    "max30102_read",
+    MAX30102_TASK_STACK_SIZE,
+    nullptr,
+    MAX30102_TASK_PRIORITY,
+    &s_taskHandle,
+    MAX30102_TASK_CORE
+  );
+
+  if (ret != pdPASS) {
+    s_taskHandle = nullptr;
+    s_taskRunning = false;
+    LOGLN("Failed to create max30102 read task");
+    return false;
+  }
+
+  // Give task a moment to start up
+  vTaskDelay(pdMS_TO_TICKS(20));
+
+  // Attach ISR to INT pin if pin >= 0
+  if (MAX30102_INT_PIN >= 0) {
+    // Note: some ESP32 pins (34..39) are input-only and may not have reliable internal pull-ups.
+    // If using those, ensure external pull-up resistor on the INT line.
+    pinMode(MAX30102_INT_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(MAX30102_INT_PIN), intISRHandler, FALLING);
+  } 
+  return true;
+}
+
+// Ask the read task to stop, wait for it to exit cleanly
+void Max30102Sensor::stop()
+{
+  if (!s_taskHandle) return;
+
+  // Request stop
+  s_taskRunning = false;
+
+  // Wake the task (in case it is waiting on notify)
+  xTaskNotifyGive(s_taskHandle);
+
+  // Clear any pending interrupts for safety
+  if (MAX30102_INT_PIN >= 0) {
+    detachInterrupt(digitalPinToInterrupt(MAX30102_INT_PIN));
+  }
+
+  // give task a moment to cleanup
+  vTaskDelay(pdMS_TO_TICKS(50));
+  // if still not stopped, force delete
+  if (s_taskHandle) {
+    vTaskDelete(s_taskHandle);
+    s_taskHandle = nullptr;
+  }
+}
+
+// Process full buffers through Maxim algorithm and store results
+static void max30102_process_buffers_when_full()
+{
   int32_t spo2 = -999;
   int32_t hr = -999;
   int8_t spo2_valid = 0;
@@ -144,62 +218,63 @@ static void max30102_process_buffers_when_full() {
   latest_spo2_valid = (spo2_valid != 0);
   latest_hr_valid = (hr_valid != 0);
 
-  if (serial_print_enabled) {
-    Serial.print(">> SPO2: ");
-    if (latest_spo2_valid) Serial.print(latest_spo2); else Serial.print("Invalid");
-    Serial.print("  HR: ");
-    if (latest_hr_valid) Serial.println(latest_hr); else Serial.println("Invalid");
-  }
+  // library no longer prints — host application will read via getLatest()
+  LOG("Processed buffer -> ");
+  LOG("SPO2: "); LOG(spo2); LOG(" HR: "); LOG(hr); LOGLN("");
 }
 
-// readTask: wait on semaphore (INT) or poll; read FIFO burst, decimate, fill algorithm buffer
-static void readTask(void *pvParameters) {
-  (void) pvParameters;
+// readTask: main worker — waits for notification (from ISR) or times out and polls
+// readTask: worker loop (uses I2C mutex)
+static void readTask(void *pvParameters)
+{
+  (void)pvParameters;
 
-  // register task to WDT
+  // Register this task with WDT
   esp_task_wdt_add(NULL);
 
-  const TickType_t waitTicks = pdMS_TO_TICKS(1000); // how long to wait for INT sem
+  const TickType_t notifyTimeout = pdMS_TO_TICKS(1000); // wait up to 1s for ISR notification
   const TickType_t shortDelay = pdMS_TO_TICKS(5);
 
-  for (;;) {
-    // Reset WDT periodically
+  // Initial small delay
+  vTaskDelay(pdMS_TO_TICKS(10));
+
+  while (s_taskRunning) {
+    // Feed WDT
     esp_task_wdt_reset();
 
-    bool triggered = false;
-    if (s_intSemaphore) {
-      // Wait for interrupt or timeout
-      if (xSemaphoreTake(s_intSemaphore, waitTicks) == pdTRUE) {
-        triggered = true;
-      }
-    } else {
-      // no semaphore => polling path; small delay
+    // wait for notification (from ISR) or timeout
+    ulTaskNotifyTake(pdTRUE, notifyTimeout); // ignore return value; we'll call check() anyway
+
+    // Protect I2C sequence
+    if (!I2C_MUTEX_TAKE(pdMS_TO_TICKS(200))) {
+      // cannot acquire mutex; yield
       vTaskDelay(shortDelay);
+      continue;
     }
 
-    // Either triggered by INT, or timed out (fallback polling). Call check() to get new data
-    uint16_t n = particleSensor.check(); // this reads FIFO_DATA into library internal buffer
+    // call check() to move FIFO data into library buffers
+    uint16_t n = particleSensor.check();
+    I2C_MUTEX_GIVE();
+
     if (n == 0) {
-      // nothing new
-      if (!triggered) {
-        // continue polling
-        vTaskDelay(shortDelay);
-        continue;
-      }
+      // nothing new, small sleep
+      vTaskDelay(shortDelay);
+      continue;
     }
 
-    // Read whatever values available in library internal ring buffer
+    // Read whatever new samples the library exposes
     while (particleSensor.available()) {
+      // Acquire I2C to get samples
+      if (!I2C_MUTEX_TAKE(pdMS_TO_TICKS(200))) break;
       uint32_t r = particleSensor.getFIFORed();
       uint32_t i = particleSensor.getFIFOIR();
+      particleSensor.nextSample();
+      I2C_MUTEX_GIVE();
 
-      // accumulate for decimation: average DECIMATE_FACTOR samples
+      // Accumulate for decimation
       acc_red += r;
       acc_ir += i;
       acc_count++;
-
-      // advance library tail
-      particleSensor.nextSample();
 
       if (acc_count >= DECIMATE_FACTOR) {
         uint32_t dec_red = acc_red / acc_count;
@@ -222,50 +297,19 @@ static void readTask(void *pvParameters) {
       }
     }
 
-    // small yield
+    // small yield to allow other tasks to run
     vTaskDelay(shortDelay);
-  }
+  } // end while s_taskRunning
 
-  // never reached
-  // esp_task_wdt_delete(NULL);
-  // vTaskDelete(NULL);
+  // cleanup: remove from WDT and delete self
+  esp_task_wdt_delete(NULL);
+  s_taskHandle = nullptr;
+  vTaskDelete(NULL);
 }
 
-bool Max30102Sensor::start() {
-  if (s_taskHandle) return true;
-
-  BaseType_t ret = xTaskCreatePinnedToCore(
-    readTask,
-    "max30102_read",
-    MAX30102_TASK_STACK_SIZE,
-    nullptr,
-    MAX30102_TASK_PRIORITY,
-    &s_taskHandle,
-    MAX30102_TASK_CORE
-  );
-
-  return (ret == pdPASS);
-}
-
-void Max30102Sensor::stop() {
-  if (s_taskHandle) {
-    // remove WDT registration for this task if called from same task; otherwise leave as-is
-    // vTaskDelete must be called from different context, so delete here:
-    vTaskDelete(s_taskHandle);
-    s_taskHandle = nullptr;
-  }
-
-  // detach INT if attached
-  if (MAX30102_INT_PIN >= 0) {
-    detachInterrupt(digitalPinToInterrupt(MAX30102_INT_PIN));
-  }
-  if (s_intSemaphore) {
-    vSemaphoreDelete(s_intSemaphore);
-    s_intSemaphore = nullptr;
-  }
-}
-
-bool Max30102Sensor::getLatest(int32_t &spo2, bool &spo2_valid, int32_t &hr, bool &hr_valid) {
+// getLatest: atomic-ish copy
+bool Max30102Sensor::getLatest(int32_t &spo2, bool &spo2_valid, int32_t &hr, bool &hr_valid)
+{
   spo2 = latest_spo2;
   hr = latest_hr;
   spo2_valid = latest_spo2_valid;
@@ -273,6 +317,9 @@ bool Max30102Sensor::getLatest(int32_t &spo2, bool &spo2_valid, int32_t &hr, boo
   return true;
 }
 
-void Max30102Sensor::enableSerialPrint(bool en) {
-  serial_print_enabled = en;
+// enableSerialPrint: no-op in library (kept for API compatibility)
+void Max30102Sensor::enableSerialPrint(bool en)
+{
+  (void)en;
+  // NO-OP: printing should be done by application print/display task
 }
