@@ -16,5 +16,8 @@ void oled_show_waiting();
 void oled_show_data(int heart_rate, int spo2, long ir_value, bool has_finger);
 // Hiển thị lỗi
 void oled_show_error(const char* error_msg);
+// Hàm mới: tắt/bật OLED hoàn toàn
+void oled_turn_off();
+void oled_turn_on();
 
 #endif

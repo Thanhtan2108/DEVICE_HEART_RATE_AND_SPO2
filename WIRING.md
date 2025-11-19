@@ -1,4 +1,4 @@
-# KẾT NỐI MODULE MAX30102 VỚI ESP32 WROOM 32
+# KẾT NỐI MODULE MAX30102, OLED VỚI ESP32 WROOM 32
 
 ## Phân tích các chân trên module MAX30102
 

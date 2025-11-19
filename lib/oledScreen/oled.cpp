@@ -85,3 +85,18 @@ void oled_show_error(const char* error_msg) {
     display.println("restart device.");
     display.display();
 }
+
+// HÀM MỚI: Tắt hoàn toàn màn hình OLED
+void oled_turn_off() {
+    display.clearDisplay();
+    display.display();
+    // Một số OLED cần lệnh đặc biệt để thực sự tắt
+    display.ssd1306_command(SSD1306_DISPLAYOFF);
+    Serial.println("OLED turned off completely");
+}
+
+// HÀM MỚI: Bật lại màn hình OLED
+void oled_turn_on() {
+    display.ssd1306_command(SSD1306_DISPLAYON);
+    Serial.println("OLED turned on");
+}
