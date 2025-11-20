@@ -254,7 +254,7 @@ void setup() {
     Serial.println("Button: Use GPIO 5 to toggle power");
     Serial.println("LED: GPIO 4 shows power status (ON=HIGH, OFF=LOW)");
     Serial.println("Watchdog: Enabled with 15s timeout");
-    Serial.println("==========================================\n");
+    Serial.println("==========================================");
 }
 
 void loop() {
