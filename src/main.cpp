@@ -1,280 +1,287 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
-#include <freertos/semphr.h>
 #include <esp_task_wdt.h>
 #include "max30102.h"
 #include "oled.h"
+#include "firebaseUpload.h"
 #include "powerControl.h"
 
-struct Measurement {
-    int heart_rate;
-    int spo2;
-    long ir_value;
-    long red_value;
-    bool has_finger;
-    bool hr_valid;
-    bool spo2_valid;
-};
+// ===== FreeRTOS Objects =====
+SemaphoreHandle_t i2cMutex = NULL;
+TaskHandle_t sensorTaskHandle = NULL;
+TaskHandle_t displayTaskHandle = NULL;
 
-static QueueHandle_t measurementQueue = nullptr;
-static SemaphoreHandle_t i2cMutex = nullptr;
-static TaskHandle_t sensorTaskHandle = nullptr;
-static TaskHandle_t displayTaskHandle = nullptr;
+// ===== Configuration =====
+#define SENSOR_TASK_PRIORITY 3
+#define DISPLAY_TASK_PRIORITY 2
+#define SENSOR_TASK_STACK_SIZE 4096
+#define DISPLAY_TASK_STACK_SIZE 4096
 
-static const TickType_t SENSOR_TASK_DELAY = pdMS_TO_TICKS(40);
-static const TickType_t DISPLAY_TASK_DELAY = pdMS_TO_TICKS(200);
-static const uint32_t WDT_TIMEOUT_S = 15; // Tăng timeout lên 15 giây
+#define UPLOAD_INTERVAL_MS 5000  // Upload mỗi 5 giây
+#define DISPLAY_UPDATE_INTERVAL_MS 1000  // Update display mỗi 1 giây
 
-// Callback để tắt OLED khi hệ thống tắt
-static void oledClearCallback() {
-    Serial.println("Clearing OLED via callback...");
-    display.clearDisplay();
-    display.display();
-    // Tắt hoàn toàn OLED
-    display.ssd1306_command(SSD1306_DISPLAYOFF);
-    Serial.println("OLED turned off completely");
-}
+// ===== Global State =====
+static int g_heartRate = 0;
+static int g_spo2 = 0;
+static long g_irValue = 0;
+static bool g_hasFingerDetected = false;
+static uint32_t g_lastUploadTime = 0;
 
-// THÊM CALLBACK FUNCTION - ĐẶT TRƯỚC setup()
-static void systemStateChangedCallback(SystemState_t newState) {
-    Serial.printf("MAIN: System state changed to: %s\n", 
-                  powerControl_getStateString(newState));
+// ===== System State Callback =====
+void onSystemStateChanged(SystemState_t newState) {
+    Serial.printf("📌 Main: System state changed to %s\n", 
+                 powerControl_getStateString(newState));
     
-    // Có thể thêm xử lý khác ở đây nếu cần
-}
-
-void logMeasurement(const Measurement& data) {
-    Serial.print("IR: "); Serial.print(data.ir_value);
-    Serial.print(" | Red: "); Serial.print(data.red_value);
-    Serial.print(" | HR: "); Serial.print(data.heart_rate);
-    Serial.print(" (valid: "); Serial.print(data.hr_valid);
-    Serial.print(") | SpO2: "); Serial.print(data.spo2);
-    Serial.print(" (valid: "); Serial.print(data.spo2_valid);
-    Serial.print(") | Finger: "); Serial.println(data.has_finger ? "Y" : "N");
-}
-
-void sensorTask(void* pvParameters) {
-    (void)pvParameters;
-    esp_task_wdt_add(NULL);
-
-    Measurement latest = {};
-
-    for (;;) {
-        // Kiểm tra trạng thái power trước khi xử lý
-        if (!powerControl_getState()) {
-            // Khi tắt, chỉ reset watchdog và delay, không làm gì cả
-            esp_task_wdt_reset();
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Delay dài khi tắt
-            continue;
-        }
-
-        long ir_value = 0;
-        long red_value = 0;
-        bool newSample = false;
-
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-            newSample = max30102_read_data(&ir_value, &red_value);
-            xSemaphoreGive(i2cMutex);
-        }
-
-        if (newSample) {
-            latest.ir_value = ir_value;
-            latest.red_value = red_value;
-            latest.has_finger = max30102_has_finger(ir_value);
-            latest.heart_rate = latest.has_finger ? max30102_get_heart_rate(ir_value) : 0;
-            latest.spo2 = latest.has_finger ? max30102_get_spo2(ir_value, red_value) : 0;
-            latest.hr_valid = max30102_is_heart_rate_valid();
-            latest.spo2_valid = max30102_is_spo2_valid();
-
-            xQueueOverwrite(measurementQueue, &latest);
-            logMeasurement(latest);
-        }
-
-        esp_task_wdt_reset();
-        vTaskDelay(SENSOR_TASK_DELAY);
-    }
-}
-
-void displayTask(void* pvParameters) {
-    (void)pvParameters;
-    esp_task_wdt_add(NULL);
-
-    Measurement current = {};
-    
-    // Hiển thị màn hình chờ ban đầu
-    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        // Bật OLED trước khi hiển thị
-        display.ssd1306_command(SSD1306_DISPLAYON);
+    if (newState == SYSTEM_STATE_OFF) {
+        // Tắt các module không cần thiết
+        firebaseUploadSetEnabled(false);
+        oled_turn_off();
+        Serial.println("💤 System entering low-power mode");
+    } else if (newState == SYSTEM_STATE_ON) {
+        // Bật lại các module
+        firebaseUploadSetEnabled(true);
+        oled_turn_on();
         oled_show_waiting();
-        xSemaphoreGive(i2cMutex);
-    }
-
-    for (;;) {
-        // Kiểm tra trạng thái power trước khi xử lý
-        if (!powerControl_getState()) {
-            // Khi hệ thống tắt, đảm bảo OLED tắt
-            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                display.clearDisplay();
-                display.display();
-                display.ssd1306_command(SSD1306_DISPLAYOFF);
-                xSemaphoreGive(i2cMutex);
-            }
-            // Khi tắt, chỉ reset watchdog và delay, không làm gì cả
-            esp_task_wdt_reset();
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Delay dài khi tắt
-            continue;
-        }
-
-        // Khi hệ thống bật, đảm bảo OLED bật
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            display.ssd1306_command(SSD1306_DISPLAYON);
-            xSemaphoreGive(i2cMutex);
-        }
-
-        // Nhận dữ liệu mới từ queue (nếu có)
-        if (xQueueReceive(measurementQueue, &current, pdMS_TO_TICKS(50)) == pdPASS) {
-            // Có dữ liệu mới, tiếp tục xử lý
-        }
-
-        // Hiển thị dữ liệu lên OLED
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            oled_show_data(current.heart_rate, current.spo2, current.ir_value, current.has_finger);
-            xSemaphoreGive(i2cMutex);
-        }
-
-        esp_task_wdt_reset();
-        vTaskDelay(DISPLAY_TASK_DELAY);
+        Serial.println("🚀 System resuming normal operation");
     }
 }
 
+// ===== Sensor Task =====
+void sensorTask(void *pvParameters) {
+    (void)pvParameters;
+    
+    Serial.println("🔬 Sensor Task started");
+    
+    // Thêm vào watchdog
+    esp_task_wdt_add(NULL);
+    
+    long irValue = 0;
+    long redValue = 0;
+    uint32_t lastReadTime = 0;
+    const uint32_t READ_INTERVAL_MS = 100; // Đọc sensor mỗi 100ms
+    
+    while (1) {
+        uint32_t currentTime = millis();
+        
+        // Chỉ đọc sensor khi hệ thống ON
+        if (powerControl_getSystemState() == SYSTEM_STATE_ON) {
+            
+            if (currentTime - lastReadTime >= READ_INTERVAL_MS) {
+                lastReadTime = currentTime;
+                
+                // Lấy I2C mutex trước khi đọc
+                if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    
+                    // Đọc dữ liệu từ sensor
+                    bool dataUpdated = max30102_read_data(&irValue, &redValue);
+                    
+                    if (dataUpdated) {
+                        // Kiểm tra ngón tay
+                        bool hasFingerNow = max30102_has_finger(irValue);
+                        
+                        // Tính toán HR và SpO2
+                        int hrValue = max30102_get_heart_rate(irValue);
+                        int spo2Value = max30102_get_spo2(irValue, redValue);
+                        
+                        // Cập nhật global state (thread-safe với mutex)
+                        g_irValue = irValue;
+                        g_hasFingerDetected = hasFingerNow;
+                        
+                        if (hasFingerNow && max30102_is_heart_rate_valid()) {
+                            g_heartRate = hrValue;
+                        }
+                        if (hasFingerNow && max30102_is_spo2_valid()) {
+                            g_spo2 = spo2Value;
+                        }
+                        
+                        // Upload lên Firebase với interval
+                        if (hasFingerNow && 
+                            hrValue > 0 && 
+                            spo2Value > 0 &&
+                            (currentTime - g_lastUploadTime >= UPLOAD_INTERVAL_MS)) {
+                            
+                            // Gửi vào queue (không block)
+                            if (sendSensorDataToFirebaseQueue(hrValue, spo2Value, 0)) {
+                                g_lastUploadTime = currentTime;
+                                Serial.printf("📊 Queued: HR=%d, SpO2=%d\n", hrValue, spo2Value);
+                            }
+                        }
+                    }
+                    
+                    xSemaphoreGive(i2cMutex);
+                }
+            }
+        }
+        
+        // Reset watchdog
+        esp_task_wdt_reset();
+        
+        // Delay để không chiếm hết CPU
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// ===== Display Task =====
+void displayTask(void *pvParameters) {
+    (void)pvParameters;
+    
+    Serial.println("🖥️ Display Task started");
+    
+    // Thêm vào watchdog
+    esp_task_wdt_add(NULL);
+    
+    uint32_t lastUpdateTime = 0;
+    
+    while (1) {
+        uint32_t currentTime = millis();
+        
+        // Chỉ update display khi hệ thống ON
+        if (powerControl_getSystemState() == SYSTEM_STATE_ON) {
+            
+            if (currentTime - lastUpdateTime >= DISPLAY_UPDATE_INTERVAL_MS) {
+                lastUpdateTime = currentTime;
+                
+                // Lấy I2C mutex
+                if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    
+                    if (g_hasFingerDetected) {
+                        oled_show_data(g_heartRate, g_spo2, g_irValue, g_hasFingerDetected);
+                    } else {
+                        oled_show_waiting();
+                    }
+                    
+                    xSemaphoreGive(i2cMutex);
+                }
+            }
+        }
+        
+        // Reset watchdog
+        esp_task_wdt_reset();
+        
+        // Delay để không chiếm hết CPU
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// ===== Setup =====
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n\n=== Starting Heart Rate & SpO2 Monitor ===");
-    Serial.println("System: Initializing...");
-
-    // GIẢI QUYẾT LỖI I2C_BUFFER_LENGTH - đặt buffer size trước khi begin
-    Wire.setBufferSize(128);
     
-    // Khởi tạo I2C với chân ESP32
-    Wire.begin(21, 22);
-    Serial.println("I2C: Initialized (SDA=21, SCL=22)");
-
-    // Tạo mutex cho I2C
+    Serial.println("\n\n=================================");
+    Serial.println("   Heart Rate & SpO2 Monitor");
+    Serial.println("=================================\n");
+    
+    // Cấu hình watchdog timeout (10 giây)
+    esp_task_wdt_init(10, true);
+    
+    // Tạo I2C mutex
     i2cMutex = xSemaphoreCreateMutex();
-    if (i2cMutex == nullptr) {
-        Serial.println("ERROR: Failed to create I2C mutex!");
-        while (true) { delay(1000); }
+    if (i2cMutex == NULL) {
+        Serial.println("❌ Failed to create I2C mutex!");
+        while(1) delay(1000);
     }
-    Serial.println("I2C: Mutex created");
-
+    Serial.println("✅ I2C Mutex created");
+    
+    // Khởi tạo I2C
+    Wire.begin();
+    Wire.setClock(400000); // 400kHz Fast Mode
+    Serial.println("✅ I2C initialized");
+    
     // Khởi tạo OLED
     if (!oled_init()) {
-        Serial.println("ERROR: Failed to initialize OLED!");
-        while(1) { delay(1000); }
+        Serial.println("❌ OLED initialization failed!");
+        while(1) delay(1000);
     }
-    Serial.println("OLED: Initialized successfully");
-
+    oled_show_waiting();
+    
     // Khởi tạo MAX30102
     if (!max30102_init()) {
-        Serial.println("ERROR: Failed to initialize MAX30102!");
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            oled_show_error("MAX30102 not found!");
-            xSemaphoreGive(i2cMutex);
-        }
-        while(1) { delay(1000); }
+        Serial.println("❌ MAX30102 initialization failed!");
+        oled_show_error("MAX30102 Error");
+        while(1) delay(1000);
     }
-    Serial.println("MAX30102: Initialized successfully");
-
-    // Tạo queue cho measurements
-    measurementQueue = xQueueCreate(1, sizeof(Measurement));
-    if (measurementQueue == nullptr) {
-        Serial.println("ERROR: Failed to create measurement queue!");
-        while(true) { delay(1000); }
-    }
-    Serial.println("Queue: Measurement queue created");
-
-    // Khởi tạo watchdog
-    esp_task_wdt_init(WDT_TIMEOUT_S, true);
-    Serial.println("Watchdog: Initialized");
-
-    // Tạo sensor task
-    BaseType_t sensorCreated = xTaskCreatePinnedToCore(
-        sensorTask,
-        "SensorTask",
-        4096,
-        nullptr,
-        3,
-        &sensorTaskHandle,
-        1
-    );
-
-    // Tạo display task  
-    BaseType_t displayCreated = xTaskCreatePinnedToCore(
-        displayTask,
-        "DisplayTask",
-        4096,
-        nullptr,
-        2,
-        &displayTaskHandle,
-        1
-    );
-
-    if (sensorCreated != pdPASS || displayCreated != pdPASS) {
-        Serial.println("ERROR: Failed to create tasks!");
-        while(true) { delay(1000); }
-    }
-    Serial.println("Tasks: Sensor and Display tasks created");
-
-    // === KHỞI TẠO POWER CONTROL MODULE ===
+    
+    // Khởi tạo Firebase (sẽ tạo task riêng)
+    Serial.println("\n📡 Initializing Firebase...");
+    firebaseUploadInit();
+    
+    // Đợi một chút để Firebase kết nối
+    delay(2000);
+    
+    // Cấu hình Power Control
     PowerControlConfig powerConfig;
     powerConfig.sensorTaskHandle = &sensorTaskHandle;
     powerConfig.displayTaskHandle = &displayTaskHandle;
     powerConfig.i2cMutex = &i2cMutex;
-    powerConfig.oledClearCallback = oledClearCallback;
-    powerConfig.systemStateChangedCallback = systemStateChangedCallback; // ĐÃ SỬA LỖI
+    powerConfig.oledClearCallback = oled_turn_off;
+    powerConfig.systemStateChangedCallback = onSystemStateChanged;
     
     if (!powerControl_init(&powerConfig)) {
-        Serial.println("ERROR: Failed to initialize power control!");
-        while(true) { delay(1000); }
+        Serial.println("❌ Power Control initialization failed!");
+        while(1) delay(1000);
     }
-    Serial.println("PowerControl: Initialized successfully");
     
-    // Khởi động power control task
+    // Tạo Sensor Task (Priority cao)
+    xTaskCreatePinnedToCore(
+        sensorTask,
+        "SensorTask",
+        SENSOR_TASK_STACK_SIZE,
+        NULL,
+        SENSOR_TASK_PRIORITY,
+        &sensorTaskHandle,
+        1  // Core 1
+    );
+    
+    // Tạo Display Task (Priority thấp hơn)
+    xTaskCreatePinnedToCore(
+        displayTask,
+        "DisplayTask",
+        DISPLAY_TASK_STACK_SIZE,
+        NULL,
+        DISPLAY_TASK_PRIORITY,
+        &displayTaskHandle,
+        1  // Core 1
+    );
+    
+    // Start Power Control Task
     if (!powerControl_startTask()) {
-        Serial.println("ERROR: Failed to start power control task!");
-        while(true) { delay(1000); }
+        Serial.println("❌ Power Control task failed!");
+        while(1) delay(1000);
     }
-    Serial.println("PowerControl: Task started");
-
-    Serial.println("\n=== SYSTEM READY ===");
-    Serial.println("Button: Use GPIO 5 to toggle power");
-    Serial.println("LED: GPIO 4 shows power status (ON=HIGH, OFF=LOW)");
-    Serial.println("Watchdog: Enabled with 15s timeout");
-    Serial.println("==========================================");
+    
+    Serial.println("\n✅ All systems initialized!");
+    Serial.println("=================================\n");
+    
+    // Thêm loop task vào watchdog
+    esp_task_wdt_add(NULL);
 }
 
+// ===== Loop =====
 void loop() {
-    // Main loop không cần watchdog
-    static uint32_t lastStatusTime = 0;
-    uint32_t now = millis();
+    // Loop task chỉ để monitor và reset watchdog
+    static uint32_t lastStatusPrint = 0;
+    uint32_t currentTime = millis();
     
-    if (now - lastStatusTime > 30000) { // Chỉ log mỗi 30 giây
-        lastStatusTime = now;
+    if (currentTime - lastStatusPrint >= 30000) { // Mỗi 30 giây
+        lastStatusPrint = currentTime;
         
-        bool powerState = powerControl_getState();
-        bool buttonState = digitalRead(POWER_BUTTON_GPIO);
-        
-        Serial.println("\n=== SYSTEM STATUS ===");
-        Serial.print("Power: "); Serial.println(powerState ? "ON" : "OFF");
-        Serial.print("Button: "); Serial.println(buttonState ? "HIGH (not pressed)" : "LOW (pressed)");
-        Serial.print("CPU: "); Serial.print(getCpuFrequencyMhz()); Serial.println(" MHz");
-        Serial.print("Heap: "); Serial.print(esp_get_free_heap_size()); Serial.println(" bytes");
-        Serial.println("=====================\n");
+        Serial.println("\n━━━━━━━━━━ System Status ━━━━━━━━━━");
+        Serial.printf("⚡ System State: %s\n", powerControl_getCurrentStateString());
+        Serial.printf("📡 Firebase Ready: %s\n", firebaseUploadIsReady() ? "YES" : "NO");
+        Serial.printf("📶 WiFi: %s (RSSI: %d)\n", 
+                     WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected",
+                     WiFi.RSSI());
+        Serial.printf("🫀 Last HR: %d BPM\n", g_heartRate);
+        Serial.printf("🩸 Last SpO2: %d %%\n", g_spo2);
+        Serial.printf("💾 Free Heap: %d bytes\n", ESP.getFreeHeap());
+        Serial.printf("⚠️ Firebase Failures: %lu\n", firebaseUploadGetConsecutiveFailures());
+        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     }
     
-    vTaskDelay(pdMS_TO_TICKS(5000)); // Giảm tần suất loop
+    // Reset watchdog cho loop task
+    esp_task_wdt_reset();
+    
+    // Delay để không spam
+    delay(1000);
 }

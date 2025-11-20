@@ -15,6 +15,13 @@ TaskHandle_t firebaseTaskHandle = NULL;
 static SemaphoreHandle_t firebaseEnabledSemaphore = NULL;
 static bool firebaseTaskEnabled = true;
 
+// ===== THÊM: Biến kiểm soát =====
+static volatile bool firebaseReady = false;
+static uint32_t lastSuccessfulUpload = 0;
+static uint32_t consecutiveFailures = 0;
+static const uint32_t MAX_CONSECUTIVE_FAILURES = 5;
+static const uint32_t FAILURE_BACKOFF_MS = 30000; // 30s
+
 void connectToWifi() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -23,6 +30,7 @@ void connectToWifi() {
     while (WiFi.status() != WL_CONNECTED && millis() - startTime < 20000) {
         delay(500);
         Serial.print(".");
+        esp_task_wdt_reset(); // QUAN TRỌNG: Reset watchdog
     }
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -31,8 +39,6 @@ void connectToWifi() {
         Serial.println(WiFi.localIP());
     } else {
         Serial.println("\nWiFi connection failed!");
-        // Có thể restart ESP ở đây nếu muốn
-        // ESP.restart();
     }
 }
 
@@ -40,96 +46,122 @@ void connectToFirebase() {
     Serial.println("🔥 Connecting to Firebase...");
 
     config.database_url = FIREBASE_DATABASE_URL;
-
-    // Khuyến nghị nên dùng để kết nối Firebase khi không có kết nối app hoặc web
     config.signer.tokens.legacy_token = FIREBASE_AUTH;
-
-    /* Khuyến khích dùng để kết nối Firebase khi có kết nối app hoặc web
-    config.api_key = FIREBASE_API_KEY;
-
-    Cách Email + Password (ổn định và bảo mật)
-    auth.user.email = FIREBASE_USER_EMAIL;
-    auth.user.password = FIREBASE_USER_PASSWORD;
-    Serial.println("Sử dụng Email/Password Authentication");
-    */
+    
+    // THÊM: Timeout configuration
+    config.timeout.serverResponse = 10 * 1000; // 10 seconds
+    config.timeout.rtdbKeepAlive = 45 * 1000;
+    config.timeout.rtdbStreamReconnect = 1 * 1000;
+    config.timeout.rtdbStreamError = 3 * 1000;
 
     Firebase.reconnectWiFi(true);
+    
+    // THÊM: Set max retry
+    fbdo.setBSSLBufferSize(1024, 1024); // Giảm buffer để tiết kiệm RAM
+    
     Firebase.begin(&config, &auth);
 
-    // Đợi xác thực thành công
+    // Đợi xác thực thành công với timeout
     Serial.print("Đang xác thực");
-    while (!Firebase.ready()) {
+    uint32_t authStart = millis();
+    while (!Firebase.ready() && (millis() - authStart < 30000)) {
         Serial.print(".");
         delay(500);
+        esp_task_wdt_reset(); // QUAN TRỌNG
     }
-    Serial.println("\nFirebase kết nối thành công!");
+    
+    if (Firebase.ready()) {
+        Serial.println("\nFirebase kết nối thành công!");
+        firebaseReady = true;
+        consecutiveFailures = 0;
+    } else {
+        Serial.println("\nFirebase kết nối thất bại!");
+        firebaseReady = false;
+    }
 }
 
 String buildPath(const String &key) {
-  String path = FIREBASE_PATH_ROOT;
-  if (!path.endsWith("/")) path += "/";
-  if (key.startsWith("/")) path += key.substring(1);
-  else path += key;
-  return path;
+    // FIXED: Sử dụng static buffer để tránh memory fragmentation
+    static char pathBuffer[128];
+    
+    const char* root = FIREBASE_PATH_ROOT.c_str();
+    const char* keyStr = key.c_str();
+    
+    // Tính toán độ dài
+    int rootLen = strlen(root);
+    int keyLen = strlen(keyStr);
+    
+    // Kiểm tra overflow
+    if (rootLen + keyLen + 2 > sizeof(pathBuffer)) {
+        Serial.println("⚠️ Path too long!");
+        return String(root); // Fallback
+    }
+    
+    // Build path
+    strcpy(pathBuffer, root);
+    if (pathBuffer[rootLen-1] != '/' && keyStr[0] != '/') {
+        strcat(pathBuffer, "/");
+    }
+    if (keyStr[0] == '/') {
+        strcat(pathBuffer, keyStr + 1);
+    } else {
+        strcat(pathBuffer, keyStr);
+    }
+    
+    return String(pathBuffer);
 }
 
-// Gửi dữ liệu trực tiếp bằng kiểu của dữ liệu
-// void sendDataToRTDB(int heartRate, int SpO2) {
-//     if (!Firebase.ready()) {
-//         Serial.println("Firebase not ready!");
-//         return;
-//     }
-
-//     String pathHR = buildPath("Heart_Rate");
-//     String pathSpO2 = buildPath("SpO2");
-
-//     bool success = true;
-
-//     if (!Firebase.RTDB.setInt(&fbdo, pathHR.c_str(), heartRate)) {
-//         Serial.printf("Failed HeartRate: %s\n", fbdo.errorReason().c_str());
-//         success = false;
-//     }
-
-//     if (!Firebase.RTDB.setInt(&fbdo, pathSpO2.c_str(), SpO2)) {
-//         Serial.printf("Failed SpO2: %s\n", fbdo.errorReason().c_str());
-//         success = false;
-//     }
-
-//     if (success) {
-//         Serial.println("Sent data successfully!");
-//     }
-// }
-
-
-// Gửi dữ liệu dạng JSON một lần (nhanh hơn, gọn hơn, ít request hơn)
 void sendDataToRTDB(int heartRate, int spo2) {
-  if (!Firebase.ready()) {
-    Serial.println("Firebase chưa sẵn sàng!");
-    return;
-  }
+    if (!firebaseReady || !Firebase.ready()) {
+        Serial.println("Firebase chưa sẵn sàng!");
+        return;
+    }
 
-  String rootPath = FIREBASE_PATH_ROOT;
+    // Kiểm tra backoff sau nhiều lỗi liên tiếp
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        if (millis() - lastSuccessfulUpload < FAILURE_BACKOFF_MS) {
+            return; // Skip upload during backoff
+        }
+        // Reset sau backoff period
+        consecutiveFailures = 0;
+        Serial.println("⚠️ Retrying after backoff period...");
+    }
 
-  FirebaseJson json;
-  json.set("Heart_Rate", heartRate);
-  json.set("SpO2", spo2);
-  json.set("timestamp", millis());
-  json.set("updated_at", Firebase.getCurrentTime());  // Thời gian từ Firebase server
+    String rootPath = FIREBASE_PATH_ROOT;
 
-  String path = buildPath("");  // Gửi vào root của device
+    FirebaseJson json;
+    json.set("Heart_Rate", heartRate);
+    json.set("SpO2", spo2);
+    json.set("timestamp", (int)millis());
+    
+    String path = buildPath("");
 
-  Serial.printf("Đang gửi dữ liệu: HR=%d, SpO2=%d ... ", heartRate, spo2);
+    Serial.printf("Đang gửi dữ liệu: HR=%d, SpO2=%d ... ", heartRate, spo2);
 
-  if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
-    Serial.println("THÀNH CÔNG!");
-  } else {
-    Serial.println("THẤT BẠI!");
-    Serial.printf("Lý do: %s (HTTP Code: %d)\n", fbdo.errorReason().c_str(), fbdo.httpCode());
-  }
+    // THÊM: Timeout cho operation
+    fbdo.setResponseSize(1024); // Giảm response buffer
+    
+    if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
+        Serial.println("THÀNH CÔNG!");
+        lastSuccessfulUpload = millis();
+        consecutiveFailures = 0;
+    } else {
+        Serial.println("THẤT BẠI!");
+        Serial.printf("Lý do: %s (HTTP Code: %d)\n", 
+                     fbdo.errorReason().c_str(), 
+                     fbdo.httpCode());
+        consecutiveFailures++;
+        
+        // Nếu lỗi nghiêm trọng, thử reconnect
+        if (fbdo.httpCode() <= 0 || fbdo.httpCode() == 401) {
+            Serial.println("⚠️ Attempting to reconnect...");
+            firebaseReady = false;
+            // Sẽ được reconnect trong task loop
+        }
+    }
 }
 
 // ===== FreeRTOS Task Function =====
-// Task này sẽ chạy liên tục và xử lý upload dữ liệu lên Firebase
 static void firebaseUploadTask(void *pvParameters) {
     SensorData_t receivedData;
     
@@ -138,20 +170,49 @@ static void firebaseUploadTask(void *pvParameters) {
     // Thêm vào watchdog
     esp_task_wdt_add(NULL);
     
+    uint32_t lastReconnectAttempt = 0;
+    const uint32_t RECONNECT_INTERVAL = 60000; // 1 phút
+    
     while (1) {
-        // Kiểm tra trạng thái enabled
-        if (firebaseTaskEnabled) {
-            // Chờ dữ liệu từ queue (timeout = 2000ms)
-            if (xQueueReceive(firebaseDataQueue, &receivedData, pdMS_TO_TICKS(2000)) == pdTRUE) {
-                // Nếu nhận được dữ liệu thì gửi lên Firebase
-                sendDataToRTDB(receivedData.heartRate, receivedData.spo2);
-            }
-        } else {
-            // Khi task bị disable, delay để không lãng phí CPU
-            vTaskDelay(pdMS_TO_TICKS(500));
+        // Reset watchdog ĐẦU TIÊN
+        esp_task_wdt_reset();
+        
+        // Kiểm tra WiFi và reconnect nếu cần
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("⚠️ WiFi disconnected! Reconnecting...");
+            connectToWifi();
+            firebaseReady = false;
         }
         
-        // Reset watchdog
+        // Kiểm tra Firebase và reconnect nếu cần
+        if (!firebaseReady && (millis() - lastReconnectAttempt > RECONNECT_INTERVAL)) {
+            lastReconnectAttempt = millis();
+            Serial.println("⚠️ Firebase not ready! Attempting reconnect...");
+            connectToFirebase();
+        }
+        
+        // Kiểm tra trạng thái enabled
+        if (firebaseTaskEnabled && firebaseReady) {
+            // Chờ dữ liệu từ queue với timeout ngắn
+            if (xQueueReceive(firebaseDataQueue, &receivedData, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                // Reset watchdog trước khi gửi
+                esp_task_wdt_reset();
+                
+                // Gửi lên Firebase
+                sendDataToRTDB(receivedData.heartRate, receivedData.spo2);
+                
+                // Reset watchdog sau khi gửi
+                esp_task_wdt_reset();
+                
+                // Delay nhỏ để tránh spam Firebase
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+        } else {
+            // Khi task bị disable hoặc Firebase chưa ready
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        
+        // Reset watchdog cuối vòng lặp
         esp_task_wdt_reset();
     }
     
@@ -175,18 +236,20 @@ void firebaseUploadInit() {
     connectToWifi();
     
     // Kết nối Firebase
-    connectToFirebase();
+    if (WiFi.status() == WL_CONNECTED) {
+        connectToFirebase();
+    }
     
     // Tạo FreeRTOS task upload Firebase
-    // Priority: 1 (thấp hơn task sensor)
-    // Stack size: 4096 bytes
-    BaseType_t xReturn = xTaskCreate(
+    // FIXED: Tăng stack size lên 8192 bytes (8KB)
+    BaseType_t xReturn = xTaskCreatePinnedToCore(
         firebaseUploadTask,           // Function của task
         "FirebaseUploadTask",         // Tên task
-        4096,                         // Stack size (bytes)
+        8192,                         // Stack size (TĂNG TỪ 4096)
         NULL,                         // Parameter
         1,                            // Priority (0 = lowest, 25 = highest)
-        &firebaseTaskHandle           // Task handle
+        &firebaseTaskHandle,          // Task handle
+        0                             // FIXED: Pin to Core 0 (tránh conflict với WiFi)
     );
     
     if (xReturn == pdPASS) {
@@ -228,4 +291,18 @@ void firebaseUploadSetEnabled(bool enabled) {
 
 bool firebaseUploadIsEnabled() {
     return firebaseTaskEnabled;
+}
+
+// ===== THÊM: Hàm utility =====
+bool firebaseUploadIsReady() {
+    return firebaseReady && Firebase.ready();
+}
+
+uint32_t firebaseUploadGetConsecutiveFailures() {
+    return consecutiveFailures;
+}
+
+void firebaseUploadForceReconnect() {
+    firebaseReady = false;
+    consecutiveFailures = 0;
 }

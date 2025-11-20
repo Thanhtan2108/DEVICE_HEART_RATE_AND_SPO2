@@ -73,5 +73,9 @@ bool sendSensorDataToFirebaseQueue(int heartRate, int spo2, TickType_t ticksToWa
 void firebaseUploadSetEnabled(bool enabled);
 // API lấy trạng thái Firebase task
 bool firebaseUploadIsEnabled();
+// THÊM: Hàm utility
+bool firebaseUploadIsReady();
+uint32_t firebaseUploadGetConsecutiveFailures();
+void firebaseUploadForceReconnect();
 
 #endif
