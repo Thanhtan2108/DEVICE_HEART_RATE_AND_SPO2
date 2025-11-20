@@ -4,7 +4,7 @@
 
 ### Nội dung phân tích bên dưới
 
-- [Phân tích datasheet MAX30102](./ANALYST_DATASHEET_MAX30102.md)
+- [Phân tích datasheet MAX30102](./folderMD/ANALYST_DATASHEET_MAX30102.md)
 
 ## B. Phát triển project
 
@@ -12,7 +12,7 @@
 
 ### 1. Thực hiện kết nối phần cứng
 
-- [Phần cứng được kết nối với ESP32](./WIRING.md)
+- [Phần cứng được kết nối với ESP32](./folderMD/WIRING.md)
 
 ### 2. Tạo project bằng PlatformIO
 
@@ -40,7 +40,7 @@ monitor_speed = 115200
 
 - Cài đặt các thư viện hỗ trợ cho project
 
-  - [Cài đặt thư viện hỗ trợ](./LIBRARY_FOR_PROJECT.md)
+  - [Cài đặt thư viện hỗ trợ](./folderMD/LIBRARY_FOR_PROJECT.md)
 
 - Cuối cùng file platformio.ini như sau:
 
@@ -108,4 +108,10 @@ lib_deps =
 
 ### 7. Phát triển module nút bật/tắt toàn bộ hệ thống
 
-## [C. Các vấn đề thắc mắc trong suốt quá trình phát triển project của bản thân người phát triển được ghi lại tại đây](./EXPLAIN.md)
+- Đây là module thực hiện chức năng bật/tắt toàn bộ hệ thống qua 1 nút nhấn, có led báo trạng thái hoạt động của hệ thống
+
+- Khi tắt, ESP32 hoạt động ở chế độ tiết kiệm năng lượng
+
+- [Xem module bật/tắt hệ thống tại đây](./lib/powerControl/)
+
+## [C. Các vấn đề thắc mắc trong suốt quá trình phát triển project của bản thân người phát triển được ghi lại tại đây](./folderMD/EXPLAIN.md)
