@@ -7,76 +7,50 @@ static PowerControlConfig* g_config = nullptr;
 static volatile SystemState_t systemState = SYSTEM_STATE_ON;
 static SemaphoreHandle_t powerStateMutex = nullptr;
 static TaskHandle_t powerControlTaskHandle = nullptr;
-static TimerHandle_t buttonDebounceTimer = nullptr;
 
-// Biến debounce
-static volatile uint32_t lastButtonPressTime = 0;
-static volatile bool buttonPressHandled = true;
-static volatile bool longPressDetected = false;
-
-// Hàm debounce timer callback
-void buttonDebounceTimerCallback(TimerHandle_t xTimer) {
-    // Timer hết hạn, reset trạng thái nút nhấn
-    buttonPressHandled = true;
-    longPressDetected = false;
-}
+// Biến debounce - SIMPLIFIED
+static volatile uint32_t lastButtonChangeTime = 0;
+static volatile bool lastButtonState = HIGH;
+static volatile bool buttonProcessed = false;
 
 static void handleSystemStateChange(SystemState_t newState) {
     if (powerStateMutex == nullptr) return;
     
-    if (xSemaphoreTake(powerStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (xSemaphoreTake(powerStateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         SystemState_t oldState = systemState;
+        
+        if (oldState == newState) {
+            xSemaphoreGive(powerStateMutex);
+            return; // Không có thay đổi
+        }
+        
         systemState = newState;
         
         // Cập nhật LED trạng thái
         digitalWrite(STATUS_LED_GPIO, (newState == SYSTEM_STATE_ON) ? HIGH : LOW);
         
-        Serial.printf("=== System State Changed: %s -> %s ===\n", 
+        Serial.printf("\n╔════════════════════════════════╗\n");
+        Serial.printf("║  STATE: %s → %s  ║\n", 
                      powerControl_getStateString(oldState),
                      powerControl_getStateString(newState));
-        
-        // Gọi callback nếu có
-        if (g_config != nullptr && g_config->systemStateChangedCallback != nullptr) {
-            g_config->systemStateChangedCallback(newState);
-        }
+        Serial.printf("╚════════════════════════════════╝\n\n");
         
         xSemaphoreGive(powerStateMutex);
-    }
-}
-
-static void processButtonPress(bool isLongPress) {
-    if (!buttonPressHandled) {
-        return; // Đang chờ xử lý, bỏ qua
-    }
-    
-    buttonPressHandled = false;
-    
-    if (isLongPress) {
-        Serial.println("LONG PRESS detected - potential future feature");
-        // Có thể thêm chức năng cho long press ở đây
-        buttonPressHandled = true;
-        return;
-    }
-    
-    // SHORT PRESS - Toggle power state
-    SystemState_t currentState = powerControl_getSystemState();
-    SystemState_t newState = (currentState == SYSTEM_STATE_ON) ? SYSTEM_STATE_OFF : SYSTEM_STATE_ON;
-    
-    Serial.printf("SHORT PRESS - Toggling power: %s -> %s\n",
-                 powerControl_getStateString(currentState),
-                 powerControl_getStateString(newState));
-    
-    handleSystemStateChange(newState);
-    
-    // Khởi động lại debounce timer
-    if (buttonDebounceTimer != nullptr) {
-        xTimerReset(buttonDebounceTimer, 0);
+        
+        // Gọi callback BÊN NGOÀI critical section để tránh deadlock
+        if (g_config != nullptr && g_config->systemStateChangedCallback != nullptr) {
+            // Delay nhỏ để đảm bảo mutex được release
+            vTaskDelay(pdMS_TO_TICKS(10));
+            g_config->systemStateChangedCallback(newState);
+        }
+    } else {
+        Serial.println("⚠️ PowerControl: Failed to acquire mutex in state change!");
     }
 }
 
 bool powerControl_init(PowerControlConfig* config) {
     if (config == nullptr) {
-        Serial.println("PowerControl: Config is null!");
+        Serial.println("❌ PowerControl: Config is null!");
         return false;
     }
     
@@ -87,36 +61,23 @@ bool powerControl_init(PowerControlConfig* config) {
     pinMode(STATUS_LED_GPIO, OUTPUT);
     digitalWrite(STATUS_LED_GPIO, HIGH); // Mặc định bật
     
-    Serial.println("PowerControl: GPIO initialized");
-    Serial.printf("  Button: GPIO %d (INPUT_PULLUP)\n", POWER_BUTTON_GPIO);
-    Serial.printf("  LED: GPIO %d (OUTPUT)\n", STATUS_LED_GPIO);
+    Serial.println("✅ PowerControl: GPIO initialized");
+    Serial.printf("   Button: GPIO %d (INPUT_PULLUP)\n", POWER_BUTTON_GPIO);
+    Serial.printf("   LED: GPIO %d (OUTPUT)\n", STATUS_LED_GPIO);
     
     // Tạo mutex
     powerStateMutex = xSemaphoreCreateMutex();
     if (powerStateMutex == nullptr) {
-        Serial.println("PowerControl: Failed to create mutex!");
-        return false;
-    }
-    
-    // Tạo software timer cho debounce
-    buttonDebounceTimer = xTimerCreate(
-        "ButtonDebounce",
-        pdMS_TO_TICKS(500), // 500ms debounce period
-        pdFALSE, // One-shot timer
-        (void*)0,
-        buttonDebounceTimerCallback
-    );
-    
-    if (buttonDebounceTimer == nullptr) {
-        Serial.println("PowerControl: Failed to create debounce timer!");
+        Serial.println("❌ PowerControl: Failed to create mutex!");
         return false;
     }
     
     systemState = SYSTEM_STATE_ON;
-    buttonPressHandled = true;
-    lastButtonPressTime = 0;
+    lastButtonState = digitalRead(POWER_BUTTON_GPIO);
+    lastButtonChangeTime = millis();
+    buttonProcessed = false;
     
-    Serial.println("PowerControl: Initialized successfully");
+    Serial.println("✅ PowerControl: Initialized successfully");
     return true;
 }
 
@@ -130,7 +91,7 @@ void powerControl_setState(bool state) {
 
 bool powerControl_startTask() {
     if (g_config == nullptr) {
-        Serial.println("PowerControl: Cannot start task - config is null!");
+        Serial.println("❌ PowerControl: Cannot start task - config is null!");
         return false;
     }
     
@@ -145,23 +106,23 @@ bool powerControl_startTask() {
     );
     
     if (result != pdPASS) {
-        Serial.println("PowerControl: Failed to create task!");
+        Serial.println("❌ PowerControl: Failed to create task!");
         return false;
     }
     
-    Serial.println("PowerControl: Task created successfully");
+    Serial.println("✅ PowerControl: Task created on Core 1");
     return true;
 }
 
 SystemState_t powerControl_getSystemState() {
     if (powerStateMutex == nullptr) return SYSTEM_STATE_ON;
     
-    if (xSemaphoreTake(powerStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        SystemState_t state = systemState;
+    SystemState_t state = SYSTEM_STATE_ON;
+    if (xSemaphoreTake(powerStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        state = systemState;
         xSemaphoreGive(powerStateMutex);
-        return state;
     }
-    return SYSTEM_STATE_ON;
+    return state;
 }
 
 const char* powerControl_getStateString(SystemState_t state) {
@@ -174,68 +135,82 @@ const char* powerControl_getStateString(SystemState_t state) {
 }
 
 const char* powerControl_getCurrentStateString() {
-    return powerControl_getStateString(systemState);
+    return powerControl_getStateString(powerControl_getSystemState());
 }
 
 void powerControlTask(void* pvParameters) {
     (void)pvParameters;
     
-    // THÊM TASK VÀO WATCHDOG - QUAN TRỌNG!
+    Serial.println("🎛️ PowerControl Task started");
+    
+    // THÊM TASK VÀO WATCHDOG
     esp_task_wdt_add(NULL);
     
-    bool lastButtonState = digitalRead(POWER_BUTTON_GPIO);
-    uint32_t buttonPressStartTime = 0;
-    bool buttonPressed = false;
+    bool currentReading = HIGH;
+    bool stableState = HIGH;
+    uint32_t debounceStartTime = 0;
+    bool debouncing = false;
     
-    Serial.println("PowerControl: Task started - monitoring button...");
+    uint32_t taskLoopCount = 0;
+    uint32_t lastHealthPrint = 0;
     
     for (;;) {
-        bool currentButtonState = digitalRead(POWER_BUTTON_GPIO);
-        uint32_t currentTime = millis();
+        taskLoopCount++;
         
-        // Phát hiện nhấn nút (HIGH -> LOW)
-        if (currentButtonState == LOW && lastButtonState == HIGH) {
-            buttonPressed = true;
-            buttonPressStartTime = currentTime;
-            Serial.println("PowerControl: Button pressed (debouncing...)");
+        // Debug task health
+        if (millis() - lastHealthPrint > 60000) {
+            lastHealthPrint = millis();
+            Serial.printf("🎛️ PowerControl Task Health: %lu loops, State=%s\n",
+                         taskLoopCount, powerControl_getCurrentStateString());
+            taskLoopCount = 0;
         }
         
-        // Phát hiện nhả nút (LOW -> HIGH) và xử lý
-        if (currentButtonState == HIGH && lastButtonState == LOW && buttonPressed) {
-            uint32_t pressDuration = currentTime - buttonPressStartTime;
-            
-            // Kiểm tra debounce và xác định loại nhấn
-            if (pressDuration >= BUTTON_DEBOUNCE_MS) {
-                bool isLongPress = (pressDuration >= BUTTON_LONG_PRESS_MS);
-                
-                if (!isLongPress) {
-                    // Short press - toggle power
-                    processButtonPress(false);
-                } else {
-                    // Long press - có thể dùng cho chức năng khác
-                    processButtonPress(true);
+        // Đọc trạng thái nút
+        currentReading = digitalRead(POWER_BUTTON_GPIO);
+        uint32_t now = millis();
+        
+        // Phát hiện thay đổi
+        if (currentReading != stableState) {
+            if (!debouncing) {
+                // Bắt đầu debounce
+                debouncing = true;
+                debounceStartTime = now;
+            } else {
+                // Kiểm tra đã đủ thời gian debounce chưa
+                if (now - debounceStartTime >= BUTTON_DEBOUNCE_MS) {
+                    // State đã ổn định sau debounce
+                    stableState = currentReading;
+                    debouncing = false;
+                    
+                    // Xử lý khi nút được NHẤN (HIGH -> LOW)
+                    if (stableState == LOW && !buttonProcessed) {
+                        buttonProcessed = true;
+                        
+                        Serial.println("🔘 Button PRESSED - toggling system state...");
+                        
+                        // Toggle state
+                        SystemState_t currentState = powerControl_getSystemState();
+                        SystemState_t newState = (currentState == SYSTEM_STATE_ON) ? 
+                                                  SYSTEM_STATE_OFF : SYSTEM_STATE_ON;
+                        
+                        // Thực hiện thay đổi
+                        handleSystemStateChange(newState);
+                    }
+                    // Reset flag khi nút được NHẢ (LOW -> HIGH)
+                    else if (stableState == HIGH) {
+                        buttonProcessed = false;
+                    }
                 }
             }
-            
-            buttonPressed = false;
+        } else {
+            // Không có thay đổi, reset debounce
+            debouncing = false;
         }
-        
-        // Xử lý long press đang diễn ra
-        if (buttonPressed && !longPressDetected) {
-            uint32_t pressDuration = currentTime - buttonPressStartTime;
-            if (pressDuration >= BUTTON_LONG_PRESS_MS) {
-                longPressDetected = true;
-                Serial.println("PowerControl: Long press detected");
-                // Có thể thêm feedback (ví dụ: LED nhấp nháy) ở đây
-            }
-        }
-        
-        lastButtonState = currentButtonState;
         
         // RESET WATCHDOG - QUAN TRỌNG!
         esp_task_wdt_reset();
         
-        // Delay hợp lý để giảm CPU usage
+        // Delay hợp lý
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
