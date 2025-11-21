@@ -88,15 +88,38 @@ void oled_show_error(const char* error_msg) {
 
 // HÀM MỚI: Tắt hoàn toàn màn hình OLED
 void oled_turn_off() {
+    Serial.println("🖥️ Turning off OLED...");
+    
+    // Bước 1: Clear display buffer
     display.clearDisplay();
     display.display();
-    // Một số OLED cần lệnh đặc biệt để thực sự tắt
+    Serial.println("   ✓ Display cleared");
+    
+    // Bước 2: Tắt màn hình hoàn toàn
     display.ssd1306_command(SSD1306_DISPLAYOFF);
-    Serial.println("OLED turned off completely");
+    Serial.println("   ✓ SSD1306_DISPLAYOFF sent");
+    
+    // Bước 3: Delay để lệnh được xử lý
+    delay(10);
+    
+    Serial.println("✅ OLED turned off completely");
 }
 
 // HÀM MỚI: Bật lại màn hình OLED
 void oled_turn_on() {
+    Serial.println("🖥️ Turning on OLED...");
+    
+    // Bước 1: Bật màn hình
     display.ssd1306_command(SSD1306_DISPLAYON);
-    Serial.println("OLED turned on");
+    Serial.println("   ✓ SSD1306_DISPLAYON sent");
+    
+    // Bước 2: Delay để lệnh được xử lý
+    delay(10);
+    
+    // Bước 3: Clear và refresh
+    display.clearDisplay();
+    display.display();
+    Serial.println("   ✓ Display refreshed");
+    
+    Serial.println("✅ OLED turned on");
 }

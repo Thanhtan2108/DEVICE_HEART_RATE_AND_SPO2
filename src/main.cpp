@@ -57,64 +57,92 @@ void safeReadGlobalData(int *hr, int *spo2, long *ir, bool *hasFinger) {
 
 // ===== System State Callback =====
 void onSystemStateChanged(SystemState_t newState) {
-    Serial.printf("\n📌 === SYSTEM STATE CHANGE: %s ===\n", 
-                 powerControl_getStateString(newState));
+    Serial.println("\n📌 ========================================");
+    Serial.printf("📌 SYSTEM STATE CALLBACK: %s\n", powerControl_getStateString(newState));
+    Serial.println("📌 ========================================\n");
     
     if (newState == SYSTEM_STATE_OFF) {
         Serial.println("💤 Entering OFF mode...");
         
-        // 1. Tạm dừng Firebase upload
+        // 1. Tạm dừng Firebase upload TRƯỚC
+        Serial.println("  [1/5] Disabling Firebase...");
         firebaseUploadSetEnabled(false);
+        vTaskDelay(pdMS_TO_TICKS(100)); // Đợi Firebase task xử lý
         
-        // 2. SUSPEND các task thay vì chỉ check state
+        // 2. SUSPEND sensor task trước (ngừng đọc dữ liệu)
+        Serial.println("  [2/5] Suspending Sensor Task...");
         if (sensorTaskHandle != NULL) {
+            eTaskState sensorState = eTaskGetState(sensorTaskHandle);
+            Serial.printf("      Sensor state before: %d\n", sensorState);
             vTaskSuspend(sensorTaskHandle);
-            Serial.println("  ⏸️ Sensor Task suspended");
+            vTaskDelay(pdMS_TO_TICKS(100)); // Đợi task suspend
+            sensorState = eTaskGetState(sensorTaskHandle);
+            Serial.printf("      Sensor state after: %d (2=Suspended)\n", sensorState);
         }
         
+        // 3. SUSPEND display task
+        Serial.println("  [3/5] Suspending Display Task...");
         if (displayTaskHandle != NULL) {
+            eTaskState displayState = eTaskGetState(displayTaskHandle);
+            Serial.printf("      Display state before: %d\n", displayState);
             vTaskSuspend(displayTaskHandle);
-            Serial.println("  ⏸️ Display Task suspended");
+            vTaskDelay(pdMS_TO_TICKS(100)); // Đợi task suspend
+            displayState = eTaskGetState(displayTaskHandle);
+            Serial.printf("      Display state after: %d (2=Suspended)\n", displayState);
         }
         
-        // 3. Đợi một chút để tasks dừng hoàn toàn
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // 4. Đợi đảm bảo không còn I2C activity
+        Serial.println("  [4/5] Waiting for I2C to be idle...");
+        vTaskDelay(pdMS_TO_TICKS(200));
         
-        // 4. Tắt OLED sau khi display task đã suspend
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        // 5. Tắt OLED sau khi display task đã CHẮC CHẮN suspend
+        Serial.println("  [5/5] Turning off OLED...");
+        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+            Serial.println("      Got I2C mutex");
             oled_turn_off();
+            Serial.println("      OLED turn_off() called");
             xSemaphoreGive(i2cMutex);
-            Serial.println("  🖥️ OLED turned off");
+            Serial.println("      I2C mutex released");
+        } else {
+            Serial.println("      ⚠️ Failed to get I2C mutex!");
         }
         
-        Serial.println("✅ System OFF completed\n");
+        Serial.println("\n✅ System OFF completed!\n");
         
     } else if (newState == SYSTEM_STATE_ON) {
         Serial.println("🚀 Entering ON mode...");
         
         // 1. Bật lại OLED trước
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        Serial.println("  [1/4] Turning on OLED...");
+        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
             oled_turn_on();
+            vTaskDelay(pdMS_TO_TICKS(50));
             oled_show_waiting();
             xSemaphoreGive(i2cMutex);
-            Serial.println("  🖥️ OLED turned on");
+            Serial.println("      OLED turned on");
         }
         
-        // 2. RESUME các task
+        // 2. RESUME sensor task
+        Serial.println("  [2/4] Resuming Sensor Task...");
         if (sensorTaskHandle != NULL) {
             vTaskResume(sensorTaskHandle);
-            Serial.println("  ▶️ Sensor Task resumed");
+            vTaskDelay(pdMS_TO_TICKS(50));
+            Serial.printf("      Sensor state: %d\n", eTaskGetState(sensorTaskHandle));
         }
         
+        // 3. RESUME display task
+        Serial.println("  [3/4] Resuming Display Task...");
         if (displayTaskHandle != NULL) {
             vTaskResume(displayTaskHandle);
-            Serial.println("  ▶️ Display Task resumed");
+            vTaskDelay(pdMS_TO_TICKS(50));
+            Serial.printf("      Display state: %d\n", eTaskGetState(displayTaskHandle));
         }
         
-        // 3. Bật lại Firebase upload
+        // 4. Bật lại Firebase upload
+        Serial.println("  [4/4] Enabling Firebase...");
         firebaseUploadSetEnabled(true);
         
-        Serial.println("✅ System ON completed\n");
+        Serial.println("\n✅ System ON completed!\n");
     }
 }
 
@@ -372,6 +400,60 @@ void loop() {
     static uint32_t lastStatusPrint = 0;
     uint32_t currentTime = millis();
     
+    // Debug on demand - gửi 'd' qua Serial Monitor
+    if (Serial.available() > 0) {
+        char cmd = Serial.read();
+        if (cmd == 'd' || cmd == 'D') {
+            // Debug task states
+            Serial.println("\n━━━━━━━━━━ Task States Debug ━━━━━━━━━━");
+            
+            if (sensorTaskHandle != NULL) {
+                eTaskState state = eTaskGetState(sensorTaskHandle);
+                const char* stateStr[] = {"Running", "Ready", "Blocked", "Suspended", "Deleted"};
+                Serial.printf("Sensor Task: %s (%d)\n", stateStr[state], state);
+                UBaseType_t stackFree = uxTaskGetStackHighWaterMark(sensorTaskHandle);
+                Serial.printf("  Stack free: %u bytes\n", stackFree * 4);
+            }
+            
+            if (displayTaskHandle != NULL) {
+                eTaskState state = eTaskGetState(displayTaskHandle);
+                const char* stateStr[] = {"Running", "Ready", "Blocked", "Suspended", "Deleted"};
+                Serial.printf("Display Task: %s (%d)\n", stateStr[state], state);
+                UBaseType_t stackFree = uxTaskGetStackHighWaterMark(displayTaskHandle);
+                Serial.printf("  Stack free: %u bytes\n", stackFree * 4);
+            }
+            
+            if (firebaseTaskHandle != NULL) {
+                eTaskState state = eTaskGetState(firebaseTaskHandle);
+                const char* stateStr[] = {"Running", "Ready", "Blocked", "Suspended", "Deleted"};
+                Serial.printf("Firebase Task: %s (%d)\n", stateStr[state], state);
+                UBaseType_t stackFree = uxTaskGetStackHighWaterMark(firebaseTaskHandle);
+                Serial.printf("  Stack free: %u bytes\n", stackFree * 4);
+            }
+            
+            Serial.printf("System State: %s\n", powerControl_getCurrentStateString());
+            Serial.printf("Free Heap: %u bytes\n", ESP.getFreeHeap());
+            Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        }
+        else if (cmd == 't' || cmd == 'T') {
+            // Test OLED toggle manual
+            Serial.println("🧪 Testing OLED toggle manually...");
+            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                Serial.println("  Turning off...");
+                oled_turn_off();
+                xSemaphoreGive(i2cMutex);
+                delay(2000);
+                if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                    Serial.println("  Turning on...");
+                    oled_turn_on();
+                    oled_show_waiting();
+                    xSemaphoreGive(i2cMutex);
+                }
+            }
+            Serial.println("✅ Test completed");
+        }
+    }
+    
     if (currentTime - lastStatusPrint >= 30000) { // Mỗi 30 giây
         lastStatusPrint = currentTime;
         
@@ -396,12 +478,22 @@ void loop() {
         Serial.printf("⚠️ Firebase Failures: %lu\n", firebaseUploadGetConsecutiveFailures());
         
         // Kiểm tra stack usage
-        UBaseType_t sensorStack = uxTaskGetStackHighWaterMark(sensorTaskHandle);
-        UBaseType_t displayStack = uxTaskGetStackHighWaterMark(displayTaskHandle);
-        Serial.printf("📚 Stack Free - Sensor: %u, Display: %u\n", 
-                     sensorStack * 4, displayStack * 4);
+        if (sensorTaskHandle != NULL) {
+            UBaseType_t sensorStack = uxTaskGetStackHighWaterMark(sensorTaskHandle);
+            Serial.printf("📚 Stack Free - Sensor: %u bytes", sensorStack * 4);
+            if (sensorStack * 4 < 512) Serial.print(" ⚠️ LOW!");
+            Serial.println();
+        }
+        
+        if (displayTaskHandle != NULL) {
+            UBaseType_t displayStack = uxTaskGetStackHighWaterMark(displayTaskHandle);
+            Serial.printf("📚 Stack Free - Display: %u bytes", displayStack * 4);
+            if (displayStack * 4 < 512) Serial.print(" ⚠️ LOW!");
+            Serial.println();
+        }
         
         Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        Serial.println("💡 Tip: Send 'd' for debug info, 't' to test OLED toggle");
     }
     
     // Reset watchdog cho loop task

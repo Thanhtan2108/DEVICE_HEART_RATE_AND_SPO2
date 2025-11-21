@@ -13,39 +13,66 @@ static volatile uint32_t lastButtonChangeTime = 0;
 static volatile bool lastButtonState = HIGH;
 static volatile bool buttonProcessed = false;
 
-static void handleSystemStateChange(SystemState_t newState) {
-    if (powerStateMutex == nullptr) return;
-    
-    if (xSemaphoreTake(powerStateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-        SystemState_t oldState = systemState;
-        
-        if (oldState == newState) {
-            xSemaphoreGive(powerStateMutex);
-            return; // Không có thay đổi
-        }
-        
-        systemState = newState;
-        
-        // Cập nhật LED trạng thái
-        digitalWrite(STATUS_LED_GPIO, (newState == SYSTEM_STATE_ON) ? HIGH : LOW);
-        
-        Serial.printf("\n╔════════════════════════════════╗\n");
-        Serial.printf("║  STATE: %s → %s  ║\n", 
-                     powerControl_getStateString(oldState),
-                     powerControl_getStateString(newState));
-        Serial.printf("╚════════════════════════════════╝\n\n");
-        
-        xSemaphoreGive(powerStateMutex);
-        
-        // Gọi callback BÊN NGOÀI critical section để tránh deadlock
-        if (g_config != nullptr && g_config->systemStateChangedCallback != nullptr) {
-            // Delay nhỏ để đảm bảo mutex được release
-            vTaskDelay(pdMS_TO_TICKS(10));
-            g_config->systemStateChangedCallback(newState);
-        }
-    } else {
-        Serial.println("⚠️ PowerControl: Failed to acquire mutex in state change!");
+// THÊM: Safe callback wrapper
+static void safeCallStateCallback(SystemState_t newState) {
+    // Kiểm tra kỹ trước khi gọi callback
+    if (g_config == nullptr) {
+        Serial.println("⚠️ Config is NULL - cannot call callback");
+        return;
     }
+    
+    if (g_config->systemStateChangedCallback == nullptr) {
+        Serial.println("⚠️ Callback is NULL - skipping");
+        return;
+    }
+    
+    // Gọi callback an toàn
+    Serial.println("📞 Calling state callback...");
+    g_config->systemStateChangedCallback(newState);
+    Serial.println("✅ Callback completed");
+}
+
+static void handleSystemStateChange(SystemState_t newState) {
+    if (powerStateMutex == nullptr) {
+        Serial.println("⚠️ PowerStateMutex is NULL!");
+        return;
+    }
+    
+    // Lấy mutex với timeout dài hơn
+    if (xSemaphoreTake(powerStateMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        Serial.println("⚠️ Failed to acquire powerStateMutex!");
+        return;
+    }
+    
+    SystemState_t oldState = systemState;
+    
+    if (oldState == newState) {
+        xSemaphoreGive(powerStateMutex);
+        Serial.println("ℹ️ State unchanged - skipping");
+        return; // Không có thay đổi
+    }
+    
+    systemState = newState;
+    
+    // Cập nhật LED trạng thái
+    digitalWrite(STATUS_LED_GPIO, (newState == SYSTEM_STATE_ON) ? HIGH : LOW);
+    
+    Serial.println();
+    Serial.println("╔════════════════════════════════╗");
+    Serial.printf("║  STATE: %-4s → %-4s         ║\n", 
+                 powerControl_getStateString(oldState),
+                 powerControl_getStateString(newState));
+    Serial.println("╚════════════════════════════════╝");
+    Serial.println();
+    
+    // RELEASE MUTEX TRƯỚC KHI GỌI CALLBACK
+    xSemaphoreGive(powerStateMutex);
+    
+    // Delay để đảm bảo mutex được release hoàn toàn
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    // Gọi callback SAU khi đã release mutex
+    safeCallStateCallback(newState);
 }
 
 bool powerControl_init(PowerControlConfig* config) {
@@ -55,6 +82,14 @@ bool powerControl_init(PowerControlConfig* config) {
     }
     
     g_config = config;
+    
+    // Validate config
+    Serial.println("🔍 Validating PowerControl config...");
+    Serial.printf("  sensorTaskHandle: %p\n", config->sensorTaskHandle);
+    Serial.printf("  displayTaskHandle: %p\n", config->displayTaskHandle);
+    Serial.printf("  i2cMutex: %p\n", config->i2cMutex);
+    Serial.printf("  oledClearCallback: %p\n", config->oledClearCallback);
+    Serial.printf("  systemStateChangedCallback: %p\n", config->systemStateChangedCallback);
     
     // Khởi tạo GPIO
     pinMode(POWER_BUTTON_GPIO, INPUT_PULLUP);
@@ -154,6 +189,10 @@ void powerControlTask(void* pvParameters) {
     uint32_t taskLoopCount = 0;
     uint32_t lastHealthPrint = 0;
     
+    // THÊM: Delay khởi động để đảm bảo tất cả tasks đã sẵn sàng
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    Serial.println("🎛️ PowerControl: Ready to handle button events");
+    
     for (;;) {
         taskLoopCount++;
         
@@ -188,13 +227,25 @@ void powerControlTask(void* pvParameters) {
                         
                         Serial.println("🔘 Button PRESSED - toggling system state...");
                         
+                        // Reset watchdog trước khi xử lý
+                        esp_task_wdt_reset();
+                        
                         // Toggle state
                         SystemState_t currentState = powerControl_getSystemState();
                         SystemState_t newState = (currentState == SYSTEM_STATE_ON) ? 
                                                   SYSTEM_STATE_OFF : SYSTEM_STATE_ON;
                         
+                        Serial.printf("   Current: %s, Target: %s\n",
+                                     powerControl_getStateString(currentState),
+                                     powerControl_getStateString(newState));
+                        
                         // Thực hiện thay đổi
                         handleSystemStateChange(newState);
+                        
+                        // Reset watchdog sau khi xử lý
+                        esp_task_wdt_reset();
+                        
+                        Serial.println("✅ State change completed");
                     }
                     // Reset flag khi nút được NHẢ (LOW -> HIGH)
                     else if (stableState == HIGH) {
