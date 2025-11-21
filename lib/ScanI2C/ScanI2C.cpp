@@ -1,7 +1,8 @@
 #include "scanI2C.h"
 
-void I2C_Init(uint8_t sdaPin, uint8_t sclPin) {
+void I2C_Init(uint8_t sdaPin, uint8_t sclPin, int speedI2C) {
     Wire.begin(sdaPin, sclPin);
+    Wire.setClock(speedI2C);
     Serial.println("[I2C] Setup completed...");
 }
 

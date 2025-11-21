@@ -10,6 +10,8 @@
 
   - Tham số truyền vào là 2 chân GPIO `SDA, SCL`
 
+  - Tốc độ I2C truyền vào, mặc định là 100000 Hz
+
 ## I2C_ScanAddress()
 
 - Đây là API (hàm) thực hiện quét kiểm tra địa chỉ I2C của Sensor
