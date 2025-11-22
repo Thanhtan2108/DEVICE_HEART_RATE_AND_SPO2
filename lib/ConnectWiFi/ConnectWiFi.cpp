@@ -1,12 +1,8 @@
 #include "ConnectWiFi.h"
 
-// Thay bằng SSID và PASSWORD của bạn
-const char* WIFI_SSID     = "P203&P204&P205";
-const char* WIFI_PASSWORD = "102duylam";
-
 static unsigned long lastReconnectAttempt = 0; // biến private của file
 
-void connectWiFi() {
+void WiFi_Connect(const char* WIFI_SSID, const char* WIFI_PASSWORD) {
     Serial.println("\n📶 Connecting to WiFi...");
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -30,7 +26,7 @@ void connectWiFi() {
     }
 }
 
-void handleWiFiReconnect() {
+void WiFi_Reconnect(const char* WIFI_SSID, const char* WIFI_PASSWORD) {
     // Nếu đang kết nối → không làm gì
     if (WiFi.status() == WL_CONNECTED) return;
 
@@ -42,5 +38,5 @@ void handleWiFiReconnect() {
     lastReconnectAttempt = millis();
 
     Serial.println("\n🔄 WiFi disconnected — retrying...");
-    connectWiFi();
+    WiFi_Connect(WIFI_SSID, WIFI_PASSWORD);
 }

@@ -1,3 +1,4 @@
+#
 
 This directory is intended for PlatformIO Test Runner and project tests.
 
@@ -8,4 +9,12 @@ determine whether they are fit for use. Unit testing finds problems early
 in the development cycle.
 
 More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+
+- [https://docs.platformio.org/en/latest/advanced/unit-testing/index.html](https://docs.platformio.org/en/latest/advanced/unit-testing/index.html)
+
+| Mục tiêu               | Câu lệnh                                                   |
+| ---------------------- | ---------------------------------------------------------- |
+| Test 1 folder cụ thể   | `pio test -e esp32doit-devkit-v1 -f test_connectwifi`                 |
+| Test nhiều folder      | `pio test -e esp32doit-devkit-v1 -f test_connectwifi -f test_scanI2C` |
+| Test tất cả folder con | `pio test -e esp32doit-devkit-v1`                                     |
+| Xem log chi tiết       | Thêm `-v` : log cơ bản, `-vv` : log nhiều hơn, `-vvv` log đầy đủ, chi tiết                                   |
