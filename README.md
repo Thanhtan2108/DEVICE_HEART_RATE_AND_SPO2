@@ -93,10 +93,6 @@ void loop() {
 
 - Xem nội dung trong các file code
 
-## Có dùng dùng NTP (lấy giờ Internet)
-
-- Lấy thời gian thực từ Internet
-
 ## Code module ESP32 giao tiếp với OLED 0.96 inch
 
 - Xem nội dung trong file code tương ứng
