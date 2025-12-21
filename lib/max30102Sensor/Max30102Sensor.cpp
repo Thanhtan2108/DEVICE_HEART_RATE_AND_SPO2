@@ -14,9 +14,9 @@ Max30102Sensor::Max30102Sensor() {
   _lastPeakSample = 0;
   _peakIdx = 0;
   _peakCountStored = 0;
-  _irThreshold = 8000; // increased threshold for better finger detection
-  _minBeatIntervalSamples = (int)(0.50f * SAMPLE_RATE); // 500 ms = max 120 bpm
-  _maxBeatIntervalSamples = (int)(1.0f * SAMPLE_RATE);  // 1000 ms = min 60 bpm
+  _irThreshold = 5000; // default; tune for your hardware
+  _minBeatIntervalSamples = (int)(0.30f * SAMPLE_RATE); // 300 ms
+  _maxBeatIntervalSamples = (int)(2.0f * SAMPLE_RATE);  // 2000 ms
   _sampleRate = SAMPLE_RATE;
 }
 
@@ -119,9 +119,9 @@ bool Max30102Sensor::detectPeak(int filteredValue) {
 
   // Need at least 3 samples history
   if ((_prev1 > _prev2) && (_prev1 > _curr)) {
-    // dynamic threshold based on signal amplitude - increased to reduce false peaks
+    // dynamic threshold based on signal amplitude
     int amplitude = abs(_prev1);
-    int dynamicThreshold = max(700, amplitude / 2); // increased threshold, less sensitive
+    int dynamicThreshold = max(200, amplitude / 3); // protect from noise
     if ((_prev1 > dynamicThreshold) && (_sampleCount - _lastPeakSample) > (uint32_t)_minBeatIntervalSamples) {
       // Detected peak at sample index (_sampleCount -1)
       return true;
@@ -151,15 +151,15 @@ float Max30102Sensor::computeBPMFromIntervals() const {
   for (int i = 0; i < _peakCountStored; ++i) sum += _peakIntervals[i];
   float avgSamples = (float)sum / (float)_peakCountStored;
   if (avgSamples <= 0.0f) return 0.0f;
-  float bpm = 60.0f * (float)_sampleRate / avgSamples - 20.0;
+  float bpm = 60.0f * (float)_sampleRate / avgSamples;
   return bpm;
 }
 
 float Max30102Sensor::computeSpO2Simple() {
-  // compute simple ratio-of-RMS over last N samples (increased to 150 for stability)
-  int n = 150;
+  // compute simple ratio-of-RMS over last N samples (use up to 100 samples)
+  int n = 100;
   if (_sampleCount < (uint32_t)n) n = _sampleCount < BUF_MAX ? (int)_sampleCount : n;
-  if (n < 20) return _spo2; // need more data
+  if (n < 10) return _spo2; // not enough data
 
   // build arrays from circular buffer: take newest n samples
   int idx = (_bufIdx - 1 + BUF_MAX) % BUF_MAX;
@@ -184,12 +184,10 @@ float Max30102Sensor::computeSpO2Simple() {
   rmsRed = sqrt(rmsRed / n);
 
   if (rmsIr <= 0.00001) return _spo2;
-  double R = (rmsRed / meanRed) / (rmsIr / meanIr); // normalized ratio
-  // Corrected SpO2 formula using proper coefficients
-  // Standard MAX30102 calibration: SpO2 = 104 - 17*R
-  double spo2 = 104.0 - 17.0 * R + 23.0;
+  double R = (rmsRed / rmsIr);
+  double spo2 = 110.0 - 25.0 * R;
   if (spo2 > 100.0) spo2 = 100.0;
-  if (spo2 < 90.0) spo2 = 90.0;   // physiologically realistic minimum
+  if (spo2 < 50.0) spo2 = 50.0;
   return (float)spo2;
 }
 
