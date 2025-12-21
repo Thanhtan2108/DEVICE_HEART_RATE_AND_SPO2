@@ -7,73 +7,93 @@
 #include <math.h>
 #include "config.h"
 
+/*
+ * Max30102Sensor
+ * ----------------
+ * - Reads raw PPG (IR + RED) from MAX30102
+ * - Computes Heart Rate (BPM) using peak detection
+ * - Estimates SpO2 using simplified AC/DC ratio method
+ *
+ * WARNING:
+ * - SpO2 calculation is NOT medically calibrated
+ * - Intended for learning, research, and AI training only
+ * - DO NOT use for medical diagnosis
+ */
+
 class Max30102Sensor {
 public:
   Max30102Sensor();
 
-  // Initialize with TwoWire instance and 7-bit address (default 0x57)
+  // Initialize sensor (Wire.begin must be called before)
   bool begin(TwoWire &wireInst, uint8_t addr = MAX30102_ADDR);
 
   // Call frequently from loop()
   void update();
 
-  // Accessors
-  bool isFingerDetected() const { return _fingerDetected; }
+  // Status / outputs
+  bool  isFingerDetected() const { return _fingerDetected; }
   float getBPM() const { return _bpm; }
   float getSpO2() const { return _spo2; }
+
+  // Raw PPG access (for AI logging)
+  uint32_t getLastIR()  const { return _irBuf[(_bufIdx - 1 + BUF_MAX) % BUF_MAX]; }
+  uint32_t getLastRed() const { return _redBuf[(_bufIdx - 1 + BUF_MAX) % BUF_MAX]; }
 
   // Power control
   void powerOn();
   void powerOff();
   void reset();
 
-  // Tune parameters
+  // Tuning
   void setIRThreshold(uint32_t thr) { _irThreshold = thr; }
-  void setSampleRate(int sr) { _sampleRate = sr; }
+  void setSampleRate(int sr);
 
 private:
+  // Hardware
   MAX30105 particle;
   TwoWire *_wire;
   uint8_t _addr;
 
-  // Running state
-  bool _fingerDetected;
+  // State
+  bool  _fingerDetected;
   float _bpm;
   float _spo2;
 
-  // Filtering / peak detection
-  static const int SAMPLE_RATE = 100;      // expected sensor sample rate (Hz)
-  static const int BUF_MAX = 600;         // circular buffer size (samples)
+  // Sampling
+  int _sampleRate; // Hz
+
+  // Circular buffers (raw PPG)
+  static const int BUF_MAX = 600; // ~6 seconds @ 100Hz
   uint32_t _irBuf[BUF_MAX];
   uint32_t _redBuf[BUF_MAX];
   int _bufIdx;
-  unsigned long _sampleCount;             // monotonic sample counter
+  uint32_t _sampleCount;
 
-  // EMA for DC removal
-  float _emaLong;     // slow EMA for DC
-  float _emaShort;    // short EMA for smoothing
+  // EMA filtering
+  float _emaLong;   // slow DC baseline
+  float _emaShort;  // fast AC smoothing
 
-  // peak detection variables
-  int _prev2;         // filtered[n-2]
-  int _prev1;         // filtered[n-1]
-  int _curr;          // filtered[n]
-  uint32_t _lastPeakSample;   // sample index of last peak
-  uint32_t _peakIntervals[8]; // circular intervals (in samples)
+  // Peak detection
+  int _prev2, _prev1, _curr;
+  uint32_t _lastPeakSample;
+  uint32_t _peakIntervals[8];
   int _peakIdx;
   int _peakCountStored;
 
-  // thresholds and params
-  uint32_t _irThreshold; // detection threshold (raw IR)
-  int _minBeatIntervalSamples; // min interval between beats in samples (~0.3s)
-  int _maxBeatIntervalSamples; // max interval (~2s)
+  // Parameters
+  uint32_t _irThreshold;
+  int _minBeatIntervalSamples;
+  int _maxBeatIntervalSamples;
 
-  // helpers
+  // Internal helpers
   void pushSample(uint32_t ir, uint32_t red);
-  int computeFiltered(int raw);
+  int  computeFiltered(int raw);
   bool detectPeak(int filteredValue);
   void recordPeak(uint32_t sampleIndex);
   float computeBPMFromIntervals() const;
-  float computeSpO2Simple(); // simple ratio method
-  int _sampleRate;
+
+  // SpO2 estimation (simplified, non-calibrated)
+  float computeSpO2Simple();
+};
 
 #endif // MAX30102_SENSOR_H
