@@ -30,7 +30,7 @@ private:
   FirebaseConfig fbConfig;
 
   // === Cấu hình hệ thống ===
-  static constexpr unsigned long FIREBASE_REPORT_INTERVAL_MS = 3000UL;
+  static constexpr unsigned long FIREBASE_REPORT_INTERVAL_MS = 500UL;
   unsigned long lastSend = 0;
   unsigned long lastReadMs = 0;
 

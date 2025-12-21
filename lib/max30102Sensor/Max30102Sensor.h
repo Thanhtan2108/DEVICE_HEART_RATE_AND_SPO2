@@ -75,6 +75,5 @@ private:
   float computeBPMFromIntervals() const;
   float computeSpO2Simple(); // simple ratio method
   int _sampleRate;
-};
 
 #endif // MAX30102_SENSOR_H

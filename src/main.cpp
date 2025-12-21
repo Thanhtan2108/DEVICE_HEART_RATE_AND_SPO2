@@ -86,6 +86,4 @@ void loop() {
   if (sensor.isFingerDetected()) {
     firebase.sendData(bpm, spo2);
   }
-
-  delay(20); // vòng lặp 50Hz
 }
