@@ -64,8 +64,8 @@ private:
 
   // thresholds and params
   uint32_t _irThreshold; // detection threshold (raw IR)
-  int _minBeatIntervalSamples; // min interval between beats in samples (~0.3s)
-  int _maxBeatIntervalSamples; // max interval (~2s)
+  int _minBeatIntervalSamples; // min interval between beats in samples (~0.5s = 50 bpm max)
+  int _maxBeatIntervalSamples; // max interval (~1s = 60 bpm min)
 
   // helpers
   void pushSample(uint32_t ir, uint32_t red);

@@ -47,7 +47,7 @@ void setup() {
     while (1) delay(500);
   }
 
-  sensor.setIRThreshold(5000);
+  sensor.setIRThreshold(8000); // adjusted for better stability
 
   // --- Power Control ---
   powerCtl.begin(false); // start inactive/off
@@ -86,6 +86,4 @@ void loop() {
   if (sensor.isFingerDetected()) {
     firebase.sendData(bpm, spo2);
   }
-
-  delay(20); // vòng lặp 50Hz
 }
