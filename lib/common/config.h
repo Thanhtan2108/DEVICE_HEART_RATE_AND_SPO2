@@ -31,12 +31,12 @@ static const char WIFI_PASSWORD[] = "102duylam";
 
 /* Firebase Realtime Database host
    e.g. "https://your-project-id-default-rtdb.firebaseio.com" */
-static const char FIREBASE_HOST[] = "https://heart-rate-spo2-52cb4-default-rtdb.asia-southeast1.firebasedatabase.app";
+static const char FIREBASE_HOST[] = "https://device-hr-and-spo2-default-rtdb.asia-southeast1.firebasedatabase.app/";
 
 /* Firebase Database Secret (legacy) or database secret token.
    If you use a modern Firebase SDK with OAuth, you may leave this empty.
    WARNING: keep this secret private. */
-static const char FIREBASE_AUTH[] = "z7nxX8FIyI2Ws92thgkoe23Mj3Vw2gXJnmxmrTMa";
+static const char FIREBASE_AUTH[] = "ISfWBqRRSnOCFBQBUGD9LZM6il6ChPTdCe4ZGOTu";
 
 /* NTP time configuration */
 static const char NTP_SERVER[] = "pool.ntp.org";
