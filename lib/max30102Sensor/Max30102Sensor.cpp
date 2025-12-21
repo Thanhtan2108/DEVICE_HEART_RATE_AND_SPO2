@@ -121,7 +121,7 @@ bool Max30102Sensor::detectPeak(int filteredValue) {
   if ((_prev1 > _prev2) && (_prev1 > _curr)) {
     // dynamic threshold based on signal amplitude
     int amplitude = abs(_prev1);
-    int dynamicThreshold = max(200, amplitude / 3); // protect from noise
+    int dynamicThreshold = max(500, amplitude / 2); // protect from noise
     if ((_prev1 > dynamicThreshold) && (_sampleCount - _lastPeakSample) > (uint32_t)_minBeatIntervalSamples) {
       // Detected peak at sample index (_sampleCount -1)
       return true;
