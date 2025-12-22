@@ -30,7 +30,7 @@ void DisplayOLED::showStatus(const String &line1, const String &line2) {
   _display.display();
 }
 
-void DisplayOLED::showVitals(int bpm, float spo2) {
+void DisplayOLED::showVitals(int bpm, int spo2) {
   _display.clearDisplay();
   _display.setTextColor(SSD1306_WHITE);
 
@@ -43,7 +43,7 @@ void DisplayOLED::showVitals(int bpm, float spo2) {
   _display.setTextSize(2);
   _display.setCursor(0, 32);
   _display.print(F("SpO2:"));
-  _display.print(spo2, 1);
+  _display.print(spo2);
   _display.println(F("%"));
 
   _display.display();

@@ -72,7 +72,7 @@ void loop() {
 
   // --- Lấy dữ liệu đo ---
   int bpm = (int) round(sensor.getBPM());       // làm tròn và ép kiểu int
-  float spo2 = round(sensor.getSpO2() * 10) / 10.0f; // 1 chữ số thập phân
+  int spo2 = (int) round(sensor.getSpO2());    // chỉ hiển thị phần nguyên
 
   // --- Hiển thị theo trạng thái ngón tay ---
   if (sensor.isFingerDetected()) {

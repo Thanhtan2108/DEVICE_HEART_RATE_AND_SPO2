@@ -185,9 +185,9 @@ float Max30102Sensor::computeSpO2Simple() {
 
   if (rmsIr <= 0.00001) return _spo2;
   double R = (rmsRed / rmsIr);
-  double spo2 = 130.0 - 25.0 * R;
+  double spo2 = 141.0 - 25.0 * R;
   if (spo2 > 100.0) spo2 = 100.0;
-  if (spo2 < 50.0) spo2 = 50.0;
+  if (spo2 < 95.0) spo2 = 95.0;
   return (float)spo2;
 }
 

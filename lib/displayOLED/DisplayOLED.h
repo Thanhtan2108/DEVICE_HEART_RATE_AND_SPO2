@@ -17,7 +17,7 @@ public:
 
   // Simple helpers to show status or vitals
   void showStatus(const String &line1, const String &line2 = String());
-  void showVitals(int bpm, float spo2);
+  void showVitals(int bpm, int spo2);
 
   // Power controls (SSD1306 commands)
   void powerOn();
