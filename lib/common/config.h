@@ -1,4 +1,5 @@
 // Link Realtime Database: https://console.firebase.google.com/project/heart-rate-spo2-52cb4/database/heart-rate-spo2-52cb4-default-rtdb/data?fb_gclid=CjwKCAjwxrLHBhA2EiwAu9EdMx4tN3TEBbPfvPgSQeteRtukB0cym6BQd7W7CXUmWDYi9Il7oAqKpRoC2aYQAvD_BwE
+// Link Realtime Database: https://device-hr-and-spo2-default-rtdb.asia-southeast1.firebasedatabase.app/
 
 #ifndef CONFIG_H
 #define CONFIG_H
