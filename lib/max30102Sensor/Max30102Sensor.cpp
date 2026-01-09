@@ -152,7 +152,7 @@ float Max30102Sensor::computeBPMFromIntervals() const {
   float avgSamples = (float)sum / (float)_peakCountStored;
   if (avgSamples <= 0.0f) return 0.0f;
   float bpm = 60.0f * (float)_sampleRate / avgSamples ;
-  return bpm - 25.0;
+  return bpm;
 }
 
 float Max30102Sensor::computeSpO2Simple() {
